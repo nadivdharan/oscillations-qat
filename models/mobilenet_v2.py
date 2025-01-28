@@ -6,21 +6,29 @@
 
 import math
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 __all__ = ["MobileNetV2"]
 
-
+class ReLU6(nn.Module):
+    def __init__(self, **kwargs):
+        super(ReLU6, self).__init__()
+    
+    def forward(self, x):
+        return torch.clamp(x, min=0, max=6)
+        
+    
 def conv_bn(inp, oup, stride):
     return nn.Sequential(
-        nn.Conv2d(inp, oup, 3, stride, 1, bias=False), nn.BatchNorm2d(oup), nn.ReLU6(inplace=True)
+        nn.Conv2d(inp, oup, 3, stride, 1, bias=False), nn.BatchNorm2d(oup), ReLU6(inplace=True)
     )
 
 
 def conv_1x1_bn(inp, oup):
     return nn.Sequential(
-        nn.Conv2d(inp, oup, 1, 1, 0, bias=False), nn.BatchNorm2d(oup), nn.ReLU6(inplace=True)
+        nn.Conv2d(inp, oup, 1, 1, 0, bias=False), nn.BatchNorm2d(oup), ReLU6(inplace=True)
     )
 
 
@@ -38,7 +46,7 @@ class InvertedResidual(nn.Module):
                 # dw
                 nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
                 nn.BatchNorm2d(hidden_dim),
-                nn.ReLU6(inplace=True),
+                ReLU6(inplace=True),
                 # pw-linear
                 nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
                 nn.BatchNorm2d(oup),
@@ -48,11 +56,11 @@ class InvertedResidual(nn.Module):
                 # pw
                 nn.Conv2d(inp, hidden_dim, 1, 1, 0, bias=False),
                 nn.BatchNorm2d(hidden_dim),
-                nn.ReLU6(inplace=True),
+                ReLU6(inplace=True),
                 # dw
                 nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
                 nn.BatchNorm2d(hidden_dim),
-                nn.ReLU6(inplace=True),
+                ReLU6(inplace=True),
                 # pw-linear
                 nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
                 nn.BatchNorm2d(oup),
@@ -66,7 +74,7 @@ class InvertedResidual(nn.Module):
 
 
 class MobileNetV2(nn.Module):
-    def __init__(self, n_class=1000, input_size=224, width_mult=1.0, dropout=0.0):
+    def __init__(self, n_class=1000, input_size=224, width_mult=1.0, dropout=0.0, **kwargs):
         super().__init__()
         block = InvertedResidual
         input_channel = 32
@@ -112,8 +120,9 @@ class MobileNetV2(nn.Module):
 
     def forward(self, x):
         x = self.features(x)
-        x = F.adaptive_avg_pool2d(x, 1).squeeze()  # type: ignore[arg-type] # accepted slang
-        x = self.classifier(x)
+        # x = F.adaptive_avg_pool2d(x, 1).squeeze()  # type: ignore[arg-type] # accepted slang
+        # x = self.classifier(x.squeeze())
+        x = self.classifier(x.squeeze(2).squeeze(2))
         return x
 
     def _initialize_weights(self):

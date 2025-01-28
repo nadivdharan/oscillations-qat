@@ -75,9 +75,13 @@ def train_quantized(config):
     )
 
     # Put quantizers in desirable state
-    set_range_estimators(config, model)
+    if config.qat.sep_quant_optimizer and not config.qat.learn_ranges:
+        raise ValueError("Seperate optimizer for quantized params is supported only when "
+                         f"ranges are learnable, but got learn_ranges={config.qat.learn_ranges}")
+    set_range_estimators(config, model, learn_ranges=config.qat.learn_ranges)
 
     print("Loaded model:\n{}".format(model))
+    # import ipdb; ipdb.set_trace()
 
     # Get all models parameters in  subcategories
     quantizer_params, model_params, grad_params = separate_quantized_model_params(model)
@@ -226,6 +230,7 @@ def validate_quantized(config, load_type):
 
     dataloaders, model = get_dataloaders_and_model(config=config, load_type=load_type, **qparams)
 
+    import ipdb; ipdb.set_trace()
     if load_type == "fp32":
         # Estimate ranges using training data
         pass_data_for_range_estimation(
@@ -240,6 +245,36 @@ def validate_quantized(config, load_type):
 
     # Fix ranges
     model.fix_ranges()
+    # import ipdb; ipdb.set_trace()
+    
+    # import torch
+    # from torchvision.models import resnet18
+
+    # from models.mobilenet_v2 import MobileNetV2
+    # from utils.imagenet_dataloaders import ImageNetDataLoaders
+
+    # dataloaders = ImageNetDataLoaders(
+    #     config.base.images_dir,
+    #     224,
+    #     config.base.batch_size,
+    #     config.base.num_workers,
+    #     config.base.interpolation,
+    # )
+    
+    # test_model = 'resnet_18'
+    # # test_model = 'mobilenet_v2'
+    
+    # if test_model == 'resnet_18':
+    #     model = resnet18(pretrained=True)
+    # elif test_model == 'mobilenet_v2':
+    #     model = MobileNetV2()
+    #     # Load model from pretrained FP32 weights
+    #     model_dir = config.base.model_dir
+    #     assert os.path.exists(model_dir)
+    #     print(f"Loading pretrained weights from {model_dir}")
+    #     state_dict = torch.load(model_dir)
+    #     model.load_state_dict(state_dict)
+    # model.to("cuda:0" if config.base.cuda else "cpu")
     print("Loaded model:\n{}".format(model))
 
     # Create evaluator

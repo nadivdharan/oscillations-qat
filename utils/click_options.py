@@ -183,6 +183,12 @@ class multi_optimizer_options:
 
 def qat_options(func):
     @click.option(
+        "--learn-ranges/--fixed-ranges",
+        is_flag=True,
+        default=True,
+        help="Make the quantization step size a learnable paramater as in LSQ paper.",
+    )
+    @click.option(
         "--reestimate-bn-stats/--no-reestimate-bn-stats",
         is_flag=True,
         default=True,
@@ -206,7 +212,7 @@ def qat_options(func):
     @wraps(func)
     def func_wrapper(config, *args, **kwargs):
         config.qat, remainder_kwargs = split_dict(
-            kwargs, ["reestimate_bn_stats", "grad_scaling", "sep_quant_optimizer"]
+            kwargs, ["reestimate_bn_stats", "grad_scaling", "sep_quant_optimizer", "learn_ranges"]
         )
         return func(config, *args, **remainder_kwargs)
 
@@ -406,7 +412,7 @@ def quantization_options(func):
     @click.option(
         "--quant-setup",
         default="LSQ_paper",
-        type=click.Choice(["all", "LSQ", "FP_logits", "fc4", "fc4_dw8", "LSQ_paper"]),
+        type=click.Choice(["Hailo", "all", "LSQ", "FP_logits", "fc4", "fc4_dw8", "LSQ_paper"]),
         help="Method to quantize the network.",
     )
     @wraps(func)

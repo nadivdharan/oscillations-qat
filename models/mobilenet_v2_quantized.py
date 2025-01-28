@@ -79,6 +79,15 @@ class QuantizedMobileNetV2(QuantizedModel):
             for layer in self.features.modules():
                 if isinstance(layer, QuantizedActivation):
                     layer.activation_quantizer = FP32Acts()
+        elif quant_setup == "Hailo":
+            # Weights of the first layer
+            self.features[0][0].weight_quantizer.quantizer.n_bits = 8
+            self.features[0][0].activation_quantizer.quantizer.n_bits = 8
+            # The quantizer of the last conv_layer layer (input to avgpool with tied quantizers)
+            self.features[-2][0].activation_quantizer.quantizer.n_bits = 8
+            # Weights of the last layer
+            self.classifier[1].weight_quantizer.quantizer.n_bits = 8
+            self.classifier[1].activation_quantizer.quantizer.n_bits = 8
         elif quant_setup is not None and quant_setup != "all":
             raise ValueError(
                 "Quantization setup '{}' not supported for MobilenetV2".format(quant_setup)

@@ -14,7 +14,7 @@ from torch.nn.modules.pooling import _AdaptiveAvgPoolNd, _AvgPoolNd
 from quantization.base_quantized_classes import QuantizedActivation, QuantizedModule
 from quantization.hijacker import QuantizationHijacker, activations_set
 from quantization.quantization_manager import QuantizationManager
-from quantization.quantized_folded_bn import BNFusedHijacker
+from quantization.quantized_folded_bn import BNFusedHijacker, BNHijacker
 
 
 class QuantConv1d(QuantizationHijacker, nn.Conv1d):
@@ -121,6 +121,10 @@ class BNQLinear(BNFusedHijacker, nn.Linear):
     def run_forward(self, x, weight, bias, offsets=None):
         return F.linear(x.contiguous(), weight.contiguous(), bias=bias)
 
+# class BNQ(BNFusedHijacker, nn.BatchNorm2d):
+class BNQ(BNHijacker, nn.BatchNorm2d):
+    def run_forward(self, x, weight, bias, offsets=None):
+        return x
 
 class QuantizedActivationWrapper(QuantizedActivation):
     """
@@ -187,6 +191,7 @@ non_bn_module_map = {
     nn.ConvTranspose2d: QuantConvTranspose,
     nn.Linear: QuantLinear,
     nn.LayerNorm: QuantLayerNorm,
+    nn.BatchNorm2d: BNQ
 }
 
 non_param_modules = (_AdaptiveAvgPoolNd, _AvgPoolNd)
@@ -247,6 +252,10 @@ def get_layernorm_args(module):
     args = dict(normalized_shape=module.normalized_shape, eps=module.eps)
     return args
 
+def get_batch_norm_args(module):
+    args = dict(num_features=module.num_features)
+    return args
+
 
 def get_module_args(mod, act):
     if isinstance(mod, _ConvNd):
@@ -255,6 +264,8 @@ def get_module_args(mod, act):
         kwargs = get_linear_args(mod)
     elif isinstance(mod, nn.LayerNorm):
         kwargs = get_layernorm_args(mod)
+    elif isinstance(mod, nn.BatchNorm2d):
+        kwargs = get_batch_norm_args(mod)
     else:
         raise ValueError
 
@@ -298,10 +309,14 @@ def quantize_sequential(model, specials=None, tie_activation_quantizers=False, *
         if isinstance(model[i], QuantizedModule):
             quant_modules.append(model[i])
         elif type(model[i]) in non_bn_module_map:
-            new_module, new_i = fold_bn(model, i, **quant_params)
+            # new_module, new_i = fold_bn(model, i, **quant_params)
+            # quant_modules.append(new_module)
+            # i = new_i
+            # continue
+            act, act_idx = get_act(model, i)
+            kwargs = get_module_args(model[i], act)
+            new_module = non_bn_module_map[type(model[i])](**kwargs, **quant_params)
             quant_modules.append(new_module)
-            i = new_i
-            continue
 
         elif type(model[i]) in specials:
             quant_modules.append(specials[type(model[i])](model[i], **quant_params))

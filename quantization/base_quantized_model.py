@@ -39,6 +39,8 @@ class QuantizedModel(nn.Module):
         parameters are loaded correctly for quantized model.
 
         """
+        if 'model' in state_dict:
+            state_dict = state_dict['model']
         quant_state_dict = {
             k: v for k, v in state_dict.items() if k.endswith("_quant_a") or k.endswith("_quant_w")
         }

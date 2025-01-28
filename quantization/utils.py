@@ -115,9 +115,13 @@ def pass_data_for_range_estimation(
         return batches
 
 
-def set_range_estimators(config, model):
-    print("Make quantizers learnable")
-    model.learn_ranges()
+def set_range_estimators(config, model, learn_ranges=True):
+    if learn_ranges:
+        print("Make quantizers learnable")
+        model.learn_ranges()
+    else:
+        print("Fix quantizers")
+        model.fix_ranges()
 
     if config.qat.grad_scaling:
         print("Activate gradient scaling")
