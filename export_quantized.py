@@ -70,23 +70,34 @@ def onnx_export(config, load_type, onnx_path, opset):
     # fp_model = DummyNet()
     sd_fp = fp_model.state_dict()
     sd_q = model.state_dict()
-    shared_keys = [k for k in sd_q if k in sd_fp]
-    import ipdb; ipdb.set_trace()
-    
+    # shared_keys1 = [k for k in sd_q if k in sd_fp]
+    # non_shared_keys1 = [k for k in sd_q if k not in sd_fp]
+    shared_keys = [k for k in sd_fp if k in sd_q] # convs + BN scales (gamma) + BN running stats (mean, var, num_batch_tracked)
+    non_shared_keys = [k for k in sd_fp if k not in sd_q] # BN biases (beta)
+
+    for key in shared_keys:
+        sd_fp[key] = sd_q[key]
+    for key in non_shared_keys:
+        bn_key = key.split('.bias')[0]+'.beta'
+        assert key in sd_fp 
+        assert bn_key in sd_q
+        sd_fp[key] = sd_q[bn_key]
+    fp_model.load_state_dict(sd_fp)
+
     print("Loaded model:\n{}".format(model))
 
     device = next(model.parameters()).device
+    fp_model.to(device)
     dummy_input = torch.rand(*model.input_size, device=device)
     
-    import ipdb; ipdb.set_trace()
     # export ONNX
-    img = torch.rand(1, 3, 224, 224)     
     with torch.no_grad():
-        torch.onnx.export(model,
-                          img,
-                          onnx_path,
-                          do_constant_folding=False,
-                          opset_version=opset)
+        torch.onnx.export(
+            fp_model,
+            dummy_input,
+            onnx_path,
+            do_constant_folding=False,
+            opset_version=opset)
         model_onnx = onnx.load(onnx_path)
         # try:
         print('Simplifying model..')
@@ -94,9 +105,6 @@ def onnx_export(config, load_type, onnx_path, opset):
         assert check, "Error in onnx simplifier..."
         onnx_path = onnx_path.split('.onnx')[0] + '_simplified.onnx'
         onnx.save(model_simp, onnx_path)
-        # except onnx.onnx_cpp2py_export.shape_inference.InferenceError as err:
-        #     print('Simplifying failed... Skipping...')
-        #     onnx.save(model_onnx, onnx_path)
         print(f"ONNX model saved at {onnx_path}")
 
 if __name__ == "__main__":

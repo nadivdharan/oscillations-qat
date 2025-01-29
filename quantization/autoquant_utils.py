@@ -301,6 +301,8 @@ def fold_bn(module, i, **quant_params):
 
 
 def quantize_sequential(model, specials=None, tie_activation_quantizers=False, **quant_params):
+    # bn_folding = True
+    bn_folding = False
     specials = specials or dict()
 
     i = 0
@@ -309,14 +311,16 @@ def quantize_sequential(model, specials=None, tie_activation_quantizers=False, *
         if isinstance(model[i], QuantizedModule):
             quant_modules.append(model[i])
         elif type(model[i]) in non_bn_module_map:
-            # new_module, new_i = fold_bn(model, i, **quant_params)
-            # quant_modules.append(new_module)
-            # i = new_i
-            # continue
-            act, act_idx = get_act(model, i)
-            kwargs = get_module_args(model[i], act)
-            new_module = non_bn_module_map[type(model[i])](**kwargs, **quant_params)
-            quant_modules.append(new_module)
+            if bn_folding:
+                new_module, new_i = fold_bn(model, i, **quant_params)
+                quant_modules.append(new_module)
+                i = new_i
+                continue
+            else:
+                act, act_idx = get_act(model, i)
+                kwargs = get_module_args(model[i], act)
+                new_module = non_bn_module_map[type(model[i])](**kwargs, **quant_params)
+                quant_modules.append(new_module)
 
         elif type(model[i]) in specials:
             quant_modules.append(specials[type(model[i])](model[i], **quant_params))
