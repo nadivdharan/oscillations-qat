@@ -8,6 +8,7 @@ from ignite.contrib.handlers import ProgressBar
 from ignite.engine import Events, create_supervised_evaluator
 from ignite.metrics import Accuracy, TopKCategoricalAccuracy, Loss
 from torch.nn import CrossEntropyLoss
+import torch
 
 from quantization.utils import (
     pass_data_for_range_estimation,
@@ -32,6 +33,7 @@ from utils.qat_utils import (
     UpdateDampeningLossWeighting,
     UpdateFreezingThreshold,
     ReestimateBNStats,
+    BinRegularizationLoss,
 )
 from utils.supervised_driver import create_trainer_engine, setup_tensorboard_logger, log_metrics
 
@@ -112,6 +114,7 @@ def train_quantized(config):
     # Set-up losses
     task_loss_fn = CrossEntropyLoss()
     dampening_loss = None
+    bin_reg_loss = None
     if config.osc_damp.weight is not None:
         # Add dampening loss to task loss
         dampening_loss = DampeningLoss(model, config.osc_damp.weight, config.osc_damp.aggregation)
@@ -120,6 +123,16 @@ def train_quantized(config):
         loss_metrics = {
             "task_loss": Loss(task_loss_fn),
             "dampening_loss": Loss(dampening_loss),
+            "loss": Loss(loss_func),
+        }
+    elif config.bin_reg.weight is not None:
+        print("Warning: Building Bin-Regularization-Loss ")
+        bin_reg_loss = BinRegularizationLoss(model, config.bin_reg.weight)
+        loss_dict = {"task_loss": task_loss_fn, "bin_reg_loss": bin_reg_loss}
+        loss_func = CompositeLoss(loss_dict)
+        loss_metrics = {
+            "task_loss": Loss(task_loss_fn),
+            "bin_reg_loss": Loss(bin_reg_loss),
             "loss": Loss(loss_func),
         }
     else:
@@ -210,6 +223,10 @@ def train_quantized(config):
 
     print("Finished training")
 
+    sd = model.state_dict()
+    final_ckpt_path = str(config.base.save_checkpoint_dir) + '/final.pth'
+    torch.save(sd, final_ckpt_path)
+    print(f"Final checkpoint saved at {final_ckpt_path}")
 
 @oscillations.command()
 @pass_config
@@ -228,53 +245,53 @@ def validate_quantized(config, load_type):
     print("Setting up network and data loaders")
     qparams = quant_params_dict(config)
 
-    dataloaders, model = get_dataloaders_and_model(config=config, load_type=load_type, **qparams)
+    # dataloaders, model = get_dataloaders_and_model(config=config, load_type=load_type, **qparams)
 
-    import ipdb; ipdb.set_trace()
-    if load_type == "fp32":
-        # Estimate ranges using training data
-        pass_data_for_range_estimation(
-            loader=dataloaders.train_loader,
-            model=model,
-            act_quant=config.quant.act_quant,
-            weight_quant=config.quant.weight_quant,
-            max_num_batches=config.quant.num_est_batches,
-        )
-        # Ensure we have the desired quant state
-        model.set_quant_state(config.quant.weight_quant, config.quant.act_quant)
+    # if load_type == "fp32":
+    #     # Estimate ranges using training data
+    #     pass_data_for_range_estimation(
+    #         loader=dataloaders.train_loader,
+    #         model=model,
+    #         act_quant=config.quant.act_quant,
+    #         weight_quant=config.quant.weight_quant,
+    #         max_num_batches=config.quant.num_est_batches,
+    #     )
+    #     # Ensure we have the desired quant state
+    #     model.set_quant_state(config.quant.weight_quant, config.quant.act_quant)
 
-    # Fix ranges
-    model.fix_ranges()
-    # import ipdb; ipdb.set_trace()
+    # # Fix ranges
+    # model.fix_ranges()
+    # from utils.qat_utils import reestimate_BN_stats
+    # # reestimate_BN_stats(model, dataloaders.train_loader, num_batches=50, store_ema_stats=False)
+    # # import ipdb; ipdb.set_trace()
     
-    # import torch
-    # from torchvision.models import resnet18
+    # # Validate FP32 model
+    from torchvision.models import resnet18
+    from models.mobilenet_v2 import MobileNetV2
+    from utils.imagenet_dataloaders import ImageNetDataLoaders
 
-    # from models.mobilenet_v2 import MobileNetV2
-    # from utils.imagenet_dataloaders import ImageNetDataLoaders
-
-    # dataloaders = ImageNetDataLoaders(
-    #     config.base.images_dir,
-    #     224,
-    #     config.base.batch_size,
-    #     config.base.num_workers,
-    #     config.base.interpolation,
-    # )
+    dataloaders = ImageNetDataLoaders(
+        config.base.images_dir,
+        224,
+        config.base.batch_size,
+        config.base.num_workers,
+        config.base.interpolation,
+    )
     
     # test_model = 'resnet_18'
-    # # test_model = 'mobilenet_v2'
-    
-    # if test_model == 'resnet_18':
-    #     model = resnet18(pretrained=True)
-    # elif test_model == 'mobilenet_v2':
-    #     model = MobileNetV2()
-    #     # Load model from pretrained FP32 weights
-    #     model_dir = config.base.model_dir
-    #     assert os.path.exists(model_dir)
-    #     print(f"Loading pretrained weights from {model_dir}")
-    #     state_dict = torch.load(model_dir)
-    #     model.load_state_dict(state_dict)
-    # model.to("cuda:0" if config.base.cuda else "cpu")
+    test_model = 'mobilenet_v2'
+
+    if test_model == 'resnet_18':
+        model = resnet18(pretrained=True)
+    elif test_model == 'mobilenet_v2':
+        model = MobileNetV2()
+        # Load model from pretrained FP32 weights
+        model_dir = config.base.model_dir
+        assert os.path.exists(model_dir)
+        print(f"Loading pretrained weights from {model_dir}")
+        state_dict = torch.load(model_dir)
+        model.load_state_dict(state_dict)
+    model.to("cuda:0" if config.base.cuda else "cpu")
     print("Loaded model:\n{}".format(model))
 
     # Create evaluator

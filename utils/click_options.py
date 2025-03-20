@@ -209,6 +209,7 @@ def qat_options(func):
     @multi_optimizer_options("quant")
     @oscillations_dampen_options
     @oscillations_freeze_options
+    @bin_regularization_options
     @wraps(func)
     def func_wrapper(config, *args, **kwargs):
         config.qat, remainder_kwargs = split_dict(
@@ -218,6 +219,27 @@ def qat_options(func):
 
     return func_wrapper
 
+
+def bin_regularization_options(func):
+    @click.option(
+        "--bin-regularization-weight",
+        default=None,
+        type=float,
+        help="If given, adds bin regularization to the loss with given  " "weighting.",
+    )
+    @wraps(func)
+    def func_wrapper(config, *args, **kwargs):
+        config.bin_reg, remainder_kwargs = split_dict(
+            kwargs,
+            [
+                "bin_regularization_weight",
+            ],
+            "bin_regularization",
+        )
+
+        return func(config, *args, **remainder_kwargs)
+
+    return func_wrapper
 
 def oscillations_dampen_options(func):
     @click.option(
@@ -415,6 +437,12 @@ def quantization_options(func):
         type=click.Choice(["Hailo", "all", "LSQ", "FP_logits", "fc4", "fc4_dw8", "LSQ_paper"]),
         help="Method to quantize the network.",
     )
+    # @click.option(
+    #     "--fold-bn",
+    #     default=None,
+    #     type=int,
+    #     help="BN folding method: 0: Naive, 1: Update B Stats, 2: Krishnamoorthi.",
+    # )
     @wraps(func)
     def func_wrapper(config, *args, **kwargs):
         config.quant, remainder_kwargs = split_dict(
@@ -436,6 +464,7 @@ def quantization_options(func):
                 "act_num_candidates",
                 "act_opt_method",
                 "act_quant_method",
+                # "fold_bn",
             ],
         )
 
@@ -471,6 +500,7 @@ def quant_params_dict(config):
         "act_range_method": config.quant.act_quant_method.cls,
         "act_range_options": act_range_options,
         "quantize_input": True if config.quant.quant_setup == "LSQ_paper" else False,
+        # "fold_bn": config.quant.fold_bn,
     }
 
     return qparams

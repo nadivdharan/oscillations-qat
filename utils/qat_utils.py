@@ -7,6 +7,7 @@ import copy
 import torch
 
 from quantization.hijacker import QuantizationHijacker
+# from quantization.quantized_folded_bn import BNFusedHijacker, BNHijacker
 from quantization.quantized_folded_bn import BNFusedHijacker
 from utils.imagenet_dataloaders import ImageNetDataLoaders
 
@@ -112,6 +113,112 @@ class UpdateDampeningLossWeighting:
         # print('Set new bin reg weighting', new_weighting)
 
 
+class WeightSmoother:
+    def __init__(self, model, alpha=0.9999):
+        self.model = model
+        self.alpha = alpha
+        
+    def __call__(self, *args, **kwargs):
+        raise ValueError("Weight Smoothing not implemented yet...")
+
+
+class BinRegularizationLoss:
+    def __init__(self, model, weighting=0.5):
+        self.model = model
+        self.weighting = weighting
+    
+    def __call__(self, *args, **kwargs):
+        mse_loss = torch.nn.MSELoss()
+        total_loss = 0.
+        for module_idx, (name, module) in enumerate(self.model.named_modules()):
+            if isinstance(module, QuantizationHijacker):
+                # FP32 weight tensor, potential folded but before quantization
+                weight, _ = module.get_weight_bias()
+                device = weight.device
+                if module._quant_w:
+                    weight_q = module.quantize_weights(weight)
+                    
+                    #####################################################################################
+                    # # in-efficient and non-differentiable way to calculate mean and variance losses # #
+                    #####################################################################################
+                    # module_loss = 0.
+                    # unique_vals = torch.unique(weight_q)  # non-differentiable
+                    # mean_loss_me = 0.
+                    # var_loss_me = 0.
+                    # var_losses = []
+                    # for wq in unique_vals:
+                    #     # Get weights corresponding to a certain quantized bin
+                    #     mask = (weight_q == wq)
+                    #     w = weight[mask]
+
+                    #     mean_loss = mse_loss(torch.mean(w), wq)
+                    #     var_loss = torch.var(w, correction=0) if w.numel() > 1 else 0.
+                    #     mean_loss_me += mean_loss
+                    #     var_loss_me += var_loss
+                    #     var_losses.append(var_loss)
+                    #     module_loss += (mean_loss + var_loss)
+                    #     total_loss += (mean_loss + var_loss)
+                    ###########################################################
+
+                    int_min = module.weight_quantizer.quantizer.int_min
+                    scale = module.weight_quantizer.quantizer.scale
+                    n_bits = module.weight_quantizer.quantizer.n_bits
+                    n_bins = 2 ** n_bits
+                    bins = torch.round(weight_q/scale).to(dtype=torch.int64) # quantized weight values
+                    # bins_zp = bins + (2**(n_bits-1)-1)
+                    # zp = bins.min() if bins.min() < -(2**(n_bits-1)-1) else -(2**(n_bits-1)-1)
+                    zp = bins.min() if bins.min() < (int_min + 1) else (int_min + 1)
+                    bins_zp = (bins - zp).to(torch.int64)
+                    
+                    bin_sum = torch.zeros(n_bins, dtype=torch.float32, device=device)
+                    bin_count = torch.zeros(n_bins, dtype=torch.float32, device=device)
+                    bin_sum.scatter_add_(0, bins_zp.view(-1), weight.view(-1))
+                    bin_count.scatter_add_(0, bins_zp.view(-1), torch.ones_like(weight.view(-1)))
+                    
+                    weight2 = weight ** 2
+                    bin_sum2 = torch.zeros(n_bins, dtype=torch.float32, device=device)
+                    bin_count2 = torch.zeros(n_bins, dtype=torch.float32, device=device)
+                    bin_sum2.scatter_add_(0, bins_zp.view(-1), weight2.view(-1))
+                    bin_count2.scatter_add_(0, bins_zp.view(-1), torch.ones_like(weight2.view(-1)))
+                    
+                    bin_means = bin_sum / bin_count
+                    bin_variances = (bin_sum2 / bin_count) - bin_means ** 2
+
+                    # Calculate module loss
+                    valid_indices = ~torch.isnan(bin_means)
+                    valid_bin_means = bin_means[valid_indices]
+                    valid_bin_variances = bin_variances[valid_indices]
+                    curr_bins = torch.arange(len(bin_means), device=device)[valid_indices] + zp
+                    wqs = curr_bins * scale
+
+                    mse_loss = torch.sum((valid_bin_means - wqs)**2)
+                    var_loss = torch.sum(valid_bin_variances)
+                    total_loss += mse_loss + var_loss
+
+                    ########################################################################################################
+                    # # DEBUG scattter_add_ vs mask method: compare retrieved weight values sum with scatter_add_ result # #
+                    ########################################################################################################
+                    # for idx, wq in enumerate(unique_vals):
+                    #     w = weight[weight_q==wq]
+                    #     num_el = torch.sum(weight_q==wq).detach().cpu().numpy()
+                    #     sum_w = w.sum().detach().cpu().numpy()
+                    #     # bin_idx = torch.round((wq/scale+(2**(n_bits-1)-1))).to(torch.int64).detach().cpu().numpy()
+                    #     bin_idx = bins_zp[weight_q==wq]
+                    #     assert torch.unique(bin_idx).size()[0] == 1, "More than one corresponding wq somehow... :/"
+                    #     bin_sum_res = (bin_sum[bin_idx]).detach().cpu().numpy()
+                    #     bin_count_res = (bin_count[bin_idx]).detach().cpu().numpy()
+                    #     print(idx,
+                    #           'bin_idx (WQ_int): ', bin_idx[0].detach().cpu().numpy(),
+                    #           'eq?: ',
+                    #           (sum_w==bin_sum_res[0]),
+                    #           'Diff: ', f'{np.abs(sum_w-bin_sum_res[0]):.3e}',
+                    #           'Sums: ', sum_w, bin_sum_res[0], [num_el, bin_count_res[0], bin_idx[0]],
+                    #           'WQ_int: ',
+                    #           )
+                    ########################################################################################################
+
+        return total_loss * self.weighting
+
 class DampeningLoss:
     def __init__(self, model, weighting=1.0, aggregation="sum"):
         """
@@ -170,6 +277,7 @@ def reestimate_BN_stats(model, data_loader, num_batches=50, store_ema_stats=Fals
     model.eval()
     org_momentum = {}
     for name, module in model.named_modules():
+        # if isinstance(module, BNFusedHijacker) or isinstance(module, BNHijacker):
         if isinstance(module, BNFusedHijacker):
             org_momentum[name] = module.momentum
             module.momentum = 1.0
@@ -195,6 +303,7 @@ def reestimate_BN_stats(model, data_loader, num_batches=50, store_ema_stats=Fals
             model(x.to(device))
             # We save the running mean/var to a buffer
             for name, module in model.named_modules():
+                # if isinstance(module, BNFusedHijacker) or isinstance(module, BNHijacker):
                 if isinstance(module, BNFusedHijacker):
                     module.running_mean_sum += module.running_mean
                     module.running_var_sum += module.running_var
@@ -204,6 +313,7 @@ def reestimate_BN_stats(model, data_loader, num_batches=50, store_ema_stats=Fals
                 break
     # At the end we normalize the buffer and write it into the running mean/var
     for name, module in model.named_modules():
+        # if isinstance(module, BNFusedHijacker) or isinstance(module, BNHijacker):
         if isinstance(module, BNFusedHijacker):
             module.running_mean = module.running_mean_sum / batch_count
             module.running_var = module.running_var_sum / batch_count
