@@ -113,28 +113,6 @@ class UpdateDampeningLossWeighting:
         self.dampen_loss.weighting = new_weighting
         # print('Set new bin reg weighting', new_weighting)
 
-
-# def smooth_data(model_ema, model, alpha):
-# def smooth_data(model_ema, alpha):
-#     with torch.no_grad():
-#         # for (name, module_ema), (_, module) in zip(model_ema.named_modules(), model.named_modules()):
-#         for (name, module_ema) in model_ema.named_modules():
-#             if isinstance(module_ema, QuantizationHijacker):
-#                 # assert isinstance(module_ema, QuantizationHijacker)
-#                 if name == 'features.0.0':
-#                     import ipdb; ipdb.set_trace()
-#                 ema_weight = module_ema.state_dict[name]['weight']
-#                 if 'weight_scale' in module_ema.state_dict[name]:
-#                     ema_weight_scale = module_ema.state_dict[name]['weight_scale']
-#                 if 'activation_scale' in module_ema.state_dict[name]:
-#                     ema_activation_scale = module_ema.state_dict[name]['activation_scale']
-#                 if 'bias' in module_ema.state_dict[name]:
-#                     ema_bias = module_ema.state_dict[name]['bias']
-                    
-#                 module_ema.weight.data = alpha * module_ema.weight.data + (1 - alpha) * module.weight.data
-#                 # TODO smoooth out also scales
-#                 if hasattr(module, "bias") and module.bias is not None:
-#                     module_ema.bias.data = alpha * module_ema.bias.data + (1 - alpha) * module.bias.data
     
 # TODO Clean this up
 class ModelChecker:
