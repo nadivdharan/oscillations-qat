@@ -7,7 +7,117 @@ from ignite.engine import Events, create_supervised_trainer, create_supervised_e
 from ignite.handlers import Checkpoint, global_step_from_engine
 from torch.optim import Optimizer
 
+import torch
+import torch.nn.functional as F
 
+from ignite.engine import Engine
+from typing import Any, Callable, Optional, Union, Sequence, Tuple
+from ignite.engine import _prepare_batch, _check_arg
+from ignite.engine.deterministic import DeterministicEngine
+
+from utils.qat_utils import get_fp32_model
+
+
+def kd_loss_fn(student_logits, teacher_logits, temperature=1.0):            
+    kd_loss = F.kl_div(
+        F.log_softmax(student_logits / temperature, dim=1),
+        F.softmax(teacher_logits / temperature, dim=1),
+        reduction="batchmean"
+    ) * (temperature ** 2)
+    return kd_loss
+
+def distillation_supervised_step(
+    model_fp32: torch.nn.Module,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    loss_fn: Union[Callable[[Any, Any], torch.Tensor], torch.nn.Module],
+    device: Optional[Union[str, torch.device]] = None,
+    non_blocking: bool = False,
+    prepare_batch: Callable = _prepare_batch,
+    model_transform: Callable[[Any], Any] = lambda output: output,
+    output_transform: Callable[[Any, Any, Any, torch.Tensor], Any] = lambda x, y, y_pred, loss: loss.item(),
+    gradient_accumulation_steps: int = 1,
+    model_fn: Callable[[torch.nn.Module, Any], Any] = lambda model, x: model(x),
+    config: Optional[dict] = None,
+
+) -> Callable:
+    if gradient_accumulation_steps <= 0:
+        raise ValueError(
+            "Gradient_accumulation_steps must be strictly positive. "
+            "No gradient accumulation if the value set to one (default)."
+        )
+
+    def update(engine: Engine, batch: Sequence[torch.Tensor]) -> Union[Any, Tuple[torch.Tensor]]:
+        if (engine.state.iteration - 1) % gradient_accumulation_steps == 0:
+            optimizer.zero_grad()
+        x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
+        with torch.no_grad():
+            output_fp32 = model_fn(model_fp32, x)
+            y_pred_fp32 = model_transform(output_fp32)
+        output = model_fn(model, x)
+        y_pred = model_transform(output)
+
+        loss_kd = config.distillation.weight * kd_loss_fn(output, output_fp32, temperature=config.distillation.temperature)
+        loss = (1. - config.distillation.weight) * loss_fn(y_pred, y_pred_fp32)
+        loss += loss_kd
+
+        if gradient_accumulation_steps > 1:
+            loss = loss / gradient_accumulation_steps
+        loss.backward()
+        if engine.state.iteration % gradient_accumulation_steps == 0:
+            optimizer.step()
+        return output_transform(x, y, y_pred, loss * gradient_accumulation_steps)
+
+    return update
+
+def create_distilling_supervised_trainer(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    loss_fn: Union[Callable[[Any, Any], torch.Tensor], torch.nn.Module],
+    device: Optional[Union[str, torch.device]] = None,
+    non_blocking: bool = False,
+    prepare_batch: Callable = _prepare_batch,
+    model_transform: Callable[[Any], Any] = lambda output: output,
+    output_transform: Callable[[Any, Any, Any, torch.Tensor], Any] = lambda x, y, y_pred, loss: loss.item(),
+    deterministic: bool = False,
+    amp_mode: Optional[str] = None,
+    scaler: Union[bool, "torch.cuda.amp.GradScaler"] = False,
+    gradient_accumulation_steps: int = 1,
+    model_fn: Callable[[torch.nn.Module, Any], Any] = lambda model, x: model(x),
+    config: Optional[dict] = None,
+) -> Engine:
+    
+    device_type = device.type if isinstance(device, torch.device) else device
+    on_tpu = "xla" in device_type if device_type is not None else False
+    on_mps = "mps" in device_type if device_type is not None else False
+    mode, _scaler = _check_arg(on_tpu, on_mps, amp_mode, scaler)
+    
+    model_fp32 = get_fp32_model(config)
+    # Freeze 
+    for param in model_fp32.parameters():
+        param.requires_grad = False
+    model_fp32.to(device).eval()
+
+    _update = distillation_supervised_step(
+        model_fp32,
+        model,
+        optimizer,
+        loss_fn,
+        device,
+        non_blocking,
+        prepare_batch,
+        model_transform,
+        output_transform,
+        gradient_accumulation_steps,
+        model_fn,
+        config,
+    )
+    trainer = Engine(_update) if not deterministic else DeterministicEngine(_update)
+    if _scaler and scaler and isinstance(scaler, bool):
+        trainer.state.scaler = _scaler  # type: ignore[attr-defined]
+
+    return trainer
+    
 def create_trainer_engine(
     model,
     optimizer,
@@ -17,15 +127,29 @@ def create_trainer_engine(
     lr_scheduler=None,
     save_checkpoint_dir=None,
     device="cuda",
+    distill=False,
+    config=None,
 ):
     # Create trainer
-    trainer = create_supervised_trainer(
-        model=model,
-        optimizer=optimizer,
-        loss_fn=criterion,
-        device=device,
-        output_transform=custom_output_transform,
-    )
+    if not distill:
+        trainer = create_supervised_trainer(
+            model=model,
+            optimizer=optimizer,
+            loss_fn=criterion,
+            device=device,
+            output_transform=custom_output_transform,
+        )
+    else:
+        print("Info: Creating Supervised Trainer with Knowledge-Distillation-Loss ")
+        trainer = create_distilling_supervised_trainer(
+            model=model,
+            optimizer=optimizer,
+            loss_fn=criterion,
+            device=device,
+            output_transform=custom_output_transform,
+            config=config,
+        )
+        
 
     for name, metric in metrics.items():
         metric.attach(trainer, name)

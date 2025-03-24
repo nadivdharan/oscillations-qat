@@ -211,6 +211,7 @@ def qat_options(func):
     @oscillations_freeze_options
     @bin_regularization_options
     @smoothing_options
+    @knowledge_distillation_options
     @wraps(func)
     def func_wrapper(config, *args, **kwargs):
         config.qat, remainder_kwargs = split_dict(
@@ -220,6 +221,48 @@ def qat_options(func):
 
     return func_wrapper
 
+
+def knowledge_distillation_options(func):
+    # @click.option(
+    #     "--distillation/--no-distillation",
+    #     is_flag=True,
+    #     default=False,
+    #     help="Use knowledge distillation for training.",
+    # )
+    @click.option(
+        "--distillation-temperature",
+        default=1.0,
+        type=float,
+        help="Temperature for knowledge distillation.",
+    )
+    # @click.option(
+    #     "--distillation-alpha",
+    #     default=0.5,
+    #     type=float,
+    #     help="Alpha for knowledge distillation.",
+    # )
+    @click.option(
+        "--distillation-weight",
+        default=None,
+        type=float,
+        help="Weight for knowledge distillation loss.",
+    )
+    @wraps(func)
+    def func_wrapper(config, *args, **kwargs):
+        config.distillation, remainder_kwargs = split_dict(
+            kwargs,
+            [
+                # "distillation",
+                "distillation_temperature",
+                # "distillation_alpha",
+                "distillation_weight",
+            ],
+            "distillation",
+        )
+
+        return func(config, *args, **remainder_kwargs)
+    
+    return func_wrapper
 
 def bin_regularization_options(func):
     @click.option(

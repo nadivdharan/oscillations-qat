@@ -113,7 +113,28 @@ class UpdateDampeningLossWeighting:
         self.dampen_loss.weighting = new_weighting
         # print('Set new bin reg weighting', new_weighting)
 
-    
+def get_fp32_model(config):
+    '''Load FP32 model from pretrained weights'''
+    from torchvision.models import resnet18
+    from models.mobilenet_v2 import MobileNetV2
+
+    model_name = config.base.architecture.name.strip('_quantized')
+    assert model_name in ['resnet18', 'mobilenet_v2'], f"Model {model_name} not supported" 
+
+    if model_name == 'resnet18':
+        model = resnet18(pretrained=True)
+    elif model_name == 'mobilenet_v2':
+        model = MobileNetV2()
+        model_dir = config.base.model_dir
+        # assert os.path.exists(model_dir)
+        print(f"Loading pretrained weights from {model_dir}")
+        state_dict = torch.load(model_dir)
+        model.load_state_dict(state_dict)
+    # model.to("cuda:0" if config.base.cuda else "cpu")
+
+    return model
+        
+
 # TODO Clean this up
 class ModelChecker:
     def __init__(self, model):
