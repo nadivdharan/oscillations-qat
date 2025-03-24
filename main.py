@@ -128,7 +128,7 @@ def train_quantized(config):
             "loss": Loss(loss_func),
         }
     elif config.bin_reg.weight is not None:
-        print("Warning: Building Bin-Regularization-Loss ")
+        print("Info: Building Bin-Regularization-Loss ")
         bin_reg_loss = BinRegularizationLoss(model, config.bin_reg.weight)
         loss_dict = {"task_loss": task_loss_fn, "bin_reg_loss": bin_reg_loss}
         loss_func = CompositeLoss(loss_dict)
@@ -153,6 +153,8 @@ def train_quantized(config):
         lr_scheduler=lr_scheduler,
         save_checkpoint_dir=config.base.save_checkpoint_dir,
         device="cuda" if config.base.cuda else "cpu",
+        distill=config.distillation.weight is not None,
+        config=config,
     )
 
     if config.base.progress_bar:
