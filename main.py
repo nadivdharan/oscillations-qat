@@ -34,6 +34,8 @@ from utils.qat_utils import (
     UpdateFreezingThreshold,
     ReestimateBNStats,
     BinRegularizationLoss,
+    QuantSmoother,
+    ModelChecker
 )
 from utils.supervised_driver import create_trainer_engine, setup_tensorboard_logger, log_metrics
 
@@ -216,6 +218,18 @@ def train_quantized(config):
                 Events.ITERATION_STARTED,
                 UpdateFreezingThreshold(oscillation_tracker_dict, annealing_schedule),
             )
+    elif config.smoothing.factor:
+        # Apply smoothing to the model
+        smoothing_factor = config.smoothing.factor
+        print(f"Applying smoothing factor {smoothing_factor} to the model")
+        # trainer.add_event_handler(
+        #         Events.ITERATION_STARTED,
+        #         ModelChecker(model),
+        # )
+        trainer.add_event_handler(
+                Events.ITERATION_COMPLETED,
+                QuantSmoother(model, alpha=smoothing_factor),
+        )
 
     print("Starting training")
 
@@ -243,55 +257,59 @@ def validate_quantized(config, load_type):
     function for running validation on pre-trained quantized models
     """
     print("Setting up network and data loaders")
-    qparams = quant_params_dict(config)
 
-    # dataloaders, model = get_dataloaders_and_model(config=config, load_type=load_type, **qparams)
+    # validate_fp32_model = True
+    validate_fp32_model = False
 
-    # if load_type == "fp32":
-    #     # Estimate ranges using training data
-    #     pass_data_for_range_estimation(
-    #         loader=dataloaders.train_loader,
-    #         model=model,
-    #         act_quant=config.quant.act_quant,
-    #         weight_quant=config.quant.weight_quant,
-    #         max_num_batches=config.quant.num_est_batches,
-    #     )
-    #     # Ensure we have the desired quant state
-    #     model.set_quant_state(config.quant.weight_quant, config.quant.act_quant)
+    if not validate_fp32_model:
+        qparams = quant_params_dict(config)
+        dataloaders, model = get_dataloaders_and_model(config=config, load_type=load_type, **qparams)
+        if load_type == "fp32":
+            # Estimate ranges using training data
+            pass_data_for_range_estimation(
+                loader=dataloaders.train_loader,
+                model=model,
+                act_quant=config.quant.act_quant,
+                weight_quant=config.quant.weight_quant,
+                max_num_batches=config.quant.num_est_batches,
+            )
+            # Ensure we have the desired quant state
+            model.set_quant_state(config.quant.weight_quant, config.quant.act_quant)
 
-    # # Fix ranges
-    # model.fix_ranges()
-    # from utils.qat_utils import reestimate_BN_stats
-    # # reestimate_BN_stats(model, dataloaders.train_loader, num_batches=50, store_ema_stats=False)
-    # # import ipdb; ipdb.set_trace()
+        # Fix ranges
+        model.fix_ranges()
+        # from utils.qat_utils import reestimate_BN_stats
+        # # reestimate_BN_stats(model, dataloaders.train_loader, num_batches=50, store_ema_stats=False)
+        # # import ipdb; ipdb.set_trace()
     
-    # # Validate FP32 model
-    from torchvision.models import resnet18
-    from models.mobilenet_v2 import MobileNetV2
-    from utils.imagenet_dataloaders import ImageNetDataLoaders
+    else:
+        # # Validate FP32 model
+        from torchvision.models import resnet18
+        from models.mobilenet_v2 import MobileNetV2
+        from utils.imagenet_dataloaders import ImageNetDataLoaders
 
-    dataloaders = ImageNetDataLoaders(
-        config.base.images_dir,
-        224,
-        config.base.batch_size,
-        config.base.num_workers,
-        config.base.interpolation,
-    )
-    
-    # test_model = 'resnet_18'
-    test_model = 'mobilenet_v2'
+        dataloaders = ImageNetDataLoaders(
+            config.base.images_dir,
+            224,
+            config.base.batch_size,
+            config.base.num_workers,
+            config.base.interpolation,
+        )
+        
+        test_model = 'resnet_18'
+        # test_model = 'mobilenet_v2'
 
-    if test_model == 'resnet_18':
-        model = resnet18(pretrained=True)
-    elif test_model == 'mobilenet_v2':
-        model = MobileNetV2()
-        # Load model from pretrained FP32 weights
-        model_dir = config.base.model_dir
-        assert os.path.exists(model_dir)
-        print(f"Loading pretrained weights from {model_dir}")
-        state_dict = torch.load(model_dir)
-        model.load_state_dict(state_dict)
-    model.to("cuda:0" if config.base.cuda else "cpu")
+        if test_model == 'resnet_18':
+            model = resnet18(pretrained=True)
+        elif test_model == 'mobilenet_v2':
+            model = MobileNetV2()
+            # Load model from pretrained FP32 weights
+            model_dir = config.base.model_dir
+            assert os.path.exists(model_dir)
+            print(f"Loading pretrained weights from {model_dir}")
+            state_dict = torch.load(model_dir)
+            model.load_state_dict(state_dict)
+        model.to("cuda:0" if config.base.cuda else "cpu")
     print("Loaded model:\n{}".format(model))
 
     # Create evaluator

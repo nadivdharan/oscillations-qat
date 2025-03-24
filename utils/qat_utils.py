@@ -5,6 +5,7 @@
 import copy
 
 import torch
+from collections import OrderedDict
 
 from quantization.hijacker import QuantizationHijacker
 # from quantization.quantized_folded_bn import BNFusedHijacker, BNHijacker
@@ -113,13 +114,129 @@ class UpdateDampeningLossWeighting:
         # print('Set new bin reg weighting', new_weighting)
 
 
-class WeightSmoother:
-    def __init__(self, model, alpha=0.9999):
+# def smooth_data(model_ema, model, alpha):
+# def smooth_data(model_ema, alpha):
+#     with torch.no_grad():
+#         # for (name, module_ema), (_, module) in zip(model_ema.named_modules(), model.named_modules()):
+#         for (name, module_ema) in model_ema.named_modules():
+#             if isinstance(module_ema, QuantizationHijacker):
+#                 # assert isinstance(module_ema, QuantizationHijacker)
+#                 if name == 'features.0.0':
+#                     import ipdb; ipdb.set_trace()
+#                 ema_weight = module_ema.state_dict[name]['weight']
+#                 if 'weight_scale' in module_ema.state_dict[name]:
+#                     ema_weight_scale = module_ema.state_dict[name]['weight_scale']
+#                 if 'activation_scale' in module_ema.state_dict[name]:
+#                     ema_activation_scale = module_ema.state_dict[name]['activation_scale']
+#                 if 'bias' in module_ema.state_dict[name]:
+#                     ema_bias = module_ema.state_dict[name]['bias']
+                    
+#                 module_ema.weight.data = alpha * module_ema.weight.data + (1 - alpha) * module.weight.data
+#                 # TODO smoooth out also scales
+#                 if hasattr(module, "bias") and module.bias is not None:
+#                     module_ema.bias.data = alpha * module_ema.bias.data + (1 - alpha) * module.bias.data
+    
+# TODO Clean this up
+class ModelChecker:
+    def __init__(self, model):
         self.model = model
-        self.alpha = alpha
         
-    def __call__(self, *args, **kwargs):
-        raise ValueError("Weight Smoothing not implemented yet...")
+    def __call__(self, engine):
+        for (name, module) in self.model.named_modules():
+            if isinstance(module, QuantizationHijacker):
+                if name == 'features.0.0':
+                    print(f"Check weight of layer {name}")
+                    import ipdb; ipdb.set_trace()
+
+
+class QuantSmoother:
+    def __init__(self, model_ema, alpha=0.9999):
+        self.model_ema = model_ema
+        # self.model = model
+        self.alpha = alpha
+        self._init_smoother()
+        
+        # initialize state dict for EMA model with initial model parameters
+        # self.ema_state_dict = OrderedDict()
+        # for (name, module_ema) in model_ema.named_modules():
+        #     if isinstance(module_ema, QuantizationHijacker):
+        #         if name not in self.ema_state_dict:
+        #             self.ema_state_dict[name] = OrderedDict()
+        #         # weights
+        #         self.ema_state_dict[name]['weight'] = module_ema.weight.data.clone()
+        #         # bias
+        #         if hasattr(module_ema, "bias") and module_ema.bias is not None:
+        #             self.ema_state_dict[name]['bias'] = module_ema.bias.data.clone()
+        #         # weight scale
+        #         if (module_ema._quant_w and 
+        #             hasattr(module_ema, "weight_quantizer") and
+        #             hasattr(module_ema.weight_quantizer, "quantizer") and
+        #             hasattr(module_ema.weight_quantizer.quantizer, "_delta")
+        #         ):
+        #             self.ema_state_dict[name]['weight_scale'] =  module_ema.weight_quantizer.quantizer._delta.data.clone()
+        #         # activation scale
+        #         if (module_ema._quant_a and 
+        #             hasattr(module_ema, "activation_quantizer") and
+        #             hasattr(module_ema.activation_quantizer, "quantizer") and
+        #             hasattr(module_ema.activation_quantizer.quantizer, "_delta")
+        #         ):  
+        #             self.ema_state_dict[name]['activation_scale'] =  module_ema.activation_quantizer.quantizer._delta.data.clone()
+
+    def _init_smoother(self):
+        self.ema_state_dict = OrderedDict()
+        for (name, module_ema) in self.model_ema.named_modules():
+            if isinstance(module_ema, QuantizationHijacker):
+                if name not in self.ema_state_dict:
+                    self.ema_state_dict[name] = OrderedDict()
+                # weights
+                self.ema_state_dict[name]['weight'] = module_ema.weight.data.clone()
+                # bias
+                if hasattr(module_ema, "bias") and module_ema.bias is not None:
+                    self.ema_state_dict[name]['bias'] = module_ema.bias.data.clone()
+                # weight scale
+                if (module_ema._quant_w and 
+                    hasattr(module_ema, "weight_quantizer") and
+                    hasattr(module_ema.weight_quantizer, "quantizer") and
+                    hasattr(module_ema.weight_quantizer.quantizer, "_delta")
+                ):
+                    self.ema_state_dict[name]['weight_scale'] =  module_ema.weight_quantizer.quantizer._delta.data.clone()
+                # activation scale
+                if (module_ema._quant_a and 
+                    hasattr(module_ema, "activation_quantizer") and
+                    hasattr(module_ema.activation_quantizer, "quantizer") and
+                    hasattr(module_ema.activation_quantizer.quantizer, "_delta")
+                ):  
+                    self.ema_state_dict[name]['activation_scale'] =  module_ema.activation_quantizer.quantizer._delta.data.clone()
+        pass
+
+    def __call__(self, engine):
+        # print(f"-- Smoothing quantization params after iteration {engine.state.iteration} --")
+        with torch.no_grad():
+            for (name, module_ema) in self.model_ema.named_modules():
+                if isinstance(module_ema, QuantizationHijacker):
+                    # smooth weights
+                    ema_weight = self.ema_state_dict[name]['weight']
+                    ema_weight.data = self.alpha * ema_weight.data + (1 - self.alpha) * module_ema.weight.data
+                    module_ema.weight.data.copy_(ema_weight.data)
+
+                    # smooth bias
+                    if 'bias' in self.ema_state_dict[name]:
+                        ema_bias = self.ema_state_dict[name]['bias']              
+                        assert hasattr(module_ema, "bias") and module_ema.bias is not None
+                        ema_bias.data = self.alpha * ema_bias.data + (1 - self.alpha) * module_ema.bias.data
+                        module_ema.bias.data.copy_(ema_bias.data)
+
+                    # smooth weight scale
+                    if 'weight_scale' in self.ema_state_dict[name]:
+                        ema_weight_scale = self.ema_state_dict[name]['weight_scale']
+                        ema_weight_scale.data = self.alpha * ema_weight_scale.data + (1 - self.alpha) * module_ema.weight_quantizer.quantizer._delta.data
+                        module_ema.weight_quantizer.quantizer._delta.data.copy_(ema_weight_scale.data)
+                    
+                    # smooth activation scale
+                    if 'activation_scale' in self.ema_state_dict[name]:
+                        ema_activation_scale = self.ema_state_dict[name]['activation_scale']
+                        ema_activation_scale.data = self.alpha * ema_activation_scale.data + (1 - self.alpha) * module_ema.activation_quantizer.quantizer._delta.data
+                        module_ema.activation_quantizer.quantizer._delta.data.copy_(ema_activation_scale.data)
 
 
 class BinRegularizationLoss:
@@ -218,6 +335,7 @@ class BinRegularizationLoss:
                     ########################################################################################################
 
         return total_loss * self.weighting
+
 
 class DampeningLoss:
     def __init__(self, model, weighting=1.0, aggregation="sum"):

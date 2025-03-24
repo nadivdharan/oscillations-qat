@@ -210,6 +210,7 @@ def qat_options(func):
     @oscillations_dampen_options
     @oscillations_freeze_options
     @bin_regularization_options
+    @smoothing_options
     @wraps(func)
     def func_wrapper(config, *args, **kwargs):
         config.qat, remainder_kwargs = split_dict(
@@ -235,6 +236,27 @@ def bin_regularization_options(func):
                 "bin_regularization_weight",
             ],
             "bin_regularization",
+        )
+
+        return func(config, *args, **remainder_kwargs)
+
+    return func_wrapper
+
+def smoothing_options(func):
+    @click.option(
+        "--smoothing-factor",
+        default=None,
+        type=float,
+        help="If given, adds EMA smoothing of weights and quantization params with given factor.",
+    )
+    @wraps(func)
+    def func_wrapper(config, *args, **kwargs):
+        config.smoothing, remainder_kwargs = split_dict(
+            kwargs,
+            [
+                "smoothing_factor",
+            ],
+            "smoothing",
         )
 
         return func(config, *args, **remainder_kwargs)
