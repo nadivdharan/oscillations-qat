@@ -50,17 +50,19 @@ def distillation_supervised_step(
     def update(engine: Engine, batch: Sequence[torch.Tensor]) -> Union[Any, Tuple[torch.Tensor]]:
         if (engine.state.iteration - 1) % gradient_accumulation_steps == 0:
             optimizer.zero_grad()
+        model.train()
         x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
         with torch.no_grad():
             output_fp32 = model_fn(model_fp32, x)
             y_pred_fp32 = model_transform(output_fp32)
         output = model_fn(model, x)
         y_pred = model_transform(output)
-
         loss_kd = config.distillation.weight * kd_loss_fn(y_pred, y_pred_fp32, temperature=config.distillation.temperature)
-        loss = (1. - config.distillation.weight) * loss_fn(y_pred, y)
+        if config.distillation.weight == 1.:
+            loss = 0.
+        else:
+            loss = (1. - config.distillation.weight) * loss_fn(y_pred, y)
         loss += loss_kd
-
         if gradient_accumulation_steps > 1:
             loss = loss / gradient_accumulation_steps
         loss.backward()
