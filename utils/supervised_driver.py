@@ -57,8 +57,8 @@ def distillation_supervised_step(
         output = model_fn(model, x)
         y_pred = model_transform(output)
 
-        loss_kd = config.distillation.weight * kd_loss_fn(output, output_fp32, temperature=config.distillation.temperature)
-        loss = (1. - config.distillation.weight) * loss_fn(y_pred, y_pred_fp32)
+        loss_kd = config.distillation.weight * kd_loss_fn(y_pred, y_pred_fp32, temperature=config.distillation.temperature)
+        loss = (1. - config.distillation.weight) * loss_fn(y_pred, y)
         loss += loss_kd
 
         if gradient_accumulation_steps > 1:
