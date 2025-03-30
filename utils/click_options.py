@@ -223,24 +223,25 @@ def qat_options(func):
 
 
 def knowledge_distillation_options(func):
-    # @click.option(
-    #     "--distillation/--no-distillation",
-    #     is_flag=True,
-    #     default=False,
-    #     help="Use knowledge distillation for training.",
-    # )
+    @click.option(
+        "--distillation-target",
+        default="logits",
+        # type=click.Choice(["logits", "features", "quantized_features"]),
+        type=click.Choice(["logits", "qfd"]),
+        help="Distillation target (logits / quantized features)",
+    )
     @click.option(
         "--distillation-temperature",
         default=1.0,
         type=float,
         help="Temperature for knowledge distillation.",
     )
-    # @click.option(
-    #     "--distillation-alpha",
-    #     default=0.5,
-    #     type=float,
-    #     help="Alpha for knowledge distillation.",
-    # )
+    @click.option(
+        "--distillation-loss-type",
+        default="kl_div",
+        type=click.Choice(["kl_div", "mse"]),
+        help="Alpha for knowledge distillation.",
+    )
     @click.option(
         "--distillation-weight",
         default=None,
@@ -252,9 +253,9 @@ def knowledge_distillation_options(func):
         config.distillation, remainder_kwargs = split_dict(
             kwargs,
             [
-                # "distillation",
+                "distillation_target",
                 "distillation_temperature",
-                # "distillation_alpha",
+                "distillation_loss_type",
                 "distillation_weight",
             ],
             "distillation",

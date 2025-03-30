@@ -7,7 +7,9 @@ from ignite.engine import Events, create_supervised_trainer, create_supervised_e
 from ignite.handlers import Checkpoint, global_step_from_engine
 from torch.optim import Optimizer
 
+import copy
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from ignite.engine import Engine
@@ -16,15 +18,61 @@ from ignite.engine import _prepare_batch, _check_arg
 from ignite.engine.deterministic import DeterministicEngine
 
 from utils.qat_utils import get_fp32_model
+from quantization.autoquant_utils import QuantLinear
+from quantization.quantization_manager import QuantizationManager
 
 
-def kd_loss_fn(student_logits, teacher_logits, temperature=1.0):            
-    kd_loss = F.kl_div(
-        F.log_softmax(student_logits / temperature, dim=1),
-        F.softmax(teacher_logits / temperature, dim=1),
-        reduction="batchmean"
-    ) * (temperature ** 2)
+def kd_loss_fn(student_output, teacher_output, temperature=1.0, loss_type="kl_div"):            
+    if loss_type == "kl_div":
+        kd_loss = F.kl_div(
+            F.log_softmax(student_output / temperature, dim=1),
+            F.softmax(teacher_output / temperature, dim=1),
+            reduction="batchmean"
+        ) * (temperature ** 2)
+    elif loss_type == "mse":
+        kd_loss = F.mse_loss(student_output, teacher_output, reduction="mean")
+    else:
+        raise ValueError(f"Unknown KD-loss type: {loss_type}")
     return kd_loss
+            
+def get_classifier_activation_quantizer(linear_layer, mode='eval'):
+    if mode not in ['eval', 'train']:
+        raise ValueError(f"Unknown mode: {mode}")    
+    quantizer = None
+    # ResNet
+    if isinstance(linear_layer, QuantLinear) and (
+        hasattr(linear_layer, "quantize_input") and
+        linear_layer.quantize_input and
+        linear_layer._quant_a
+    ):
+        if mode =='eval':
+            # Freeze the quantizer parameters
+            quantizer = copy.deepcopy(linear_layer.activation_quantizer)
+            for param in quantizer.parameters():
+                param.requires_grad = False
+            return quantizer
+        else:
+            return linear_layer.activation_quantizer
+    
+    # MobileNetV2, EfficientNet
+    elif isinstance(linear_layer, nn.Sequential):
+        for module in linear_layer:
+            if isinstance(module, QuantLinear):
+                if (hasattr(module, "quantize_input") and
+                    module.quantize_input and
+                    module._quant_a
+                ):
+                    break
+        if mode == 'eval':
+            # Freeze the quantizer parameters
+            quantizer = copy.deepcopy(module.activation_quantizer)
+            for param in quantizer.parameters():
+                param.requires_grad = False
+            return quantizer
+        else:
+            return module.activation_quantizer
+    else:
+        raise ValueError(f"Expected classifier with type QuantLinear or nn.Sequential but got {type(fc)}")
 
 def distillation_supervised_step(
     model_fp32: torch.nn.Module,
@@ -39,6 +87,7 @@ def distillation_supervised_step(
     gradient_accumulation_steps: int = 1,
     model_fn: Callable[[torch.nn.Module, Any], Any] = lambda model, x: model(x),
     config: Optional[dict] = None,
+    activations_dict: Optional[dict] = None,
 
 ) -> Callable:
     if gradient_accumulation_steps <= 0:
@@ -46,18 +95,64 @@ def distillation_supervised_step(
             "Gradient_accumulation_steps must be strictly positive. "
             "No gradient accumulation if the value set to one (default)."
         )
-
-    def update(engine: Engine, batch: Sequence[torch.Tensor]) -> Union[Any, Tuple[torch.Tensor]]:
+    def update_new(engine: Engine, batch: Sequence[torch.Tensor]) -> Union[Any, Tuple[torch.Tensor]]:
         if (engine.state.iteration - 1) % gradient_accumulation_steps == 0:
             optimizer.zero_grad()
         model.train()
         x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
         with torch.no_grad():
             output_fp32 = model_fn(model_fp32, x)
+            features_fp32 = activations_dict.get("model_fp32_avgpool", None) # For QFD
             y_pred_fp32 = model_transform(output_fp32)
         output = model_fn(model, x)
+        features = activations_dict.get("model_avgpool", None) # For QFD
         y_pred = model_transform(output)
-        loss_kd = config.distillation.weight * kd_loss_fn(y_pred, y_pred_fp32, temperature=config.distillation.temperature)
+        
+        # For QFD
+        quantizer = None
+        if 'qfd' in config.distillation.target:
+            # Get the classifier layer
+            if hasattr(model, 'fc'):
+                assert hasattr(model_fp32, 'fc')
+                linear = model.fc
+            elif hasattr(model, 'classifier'):
+                assert hasattr(model_fp32, 'classifier')
+                linear = model.classifier
+            else:
+                raise ValueError("Model does not have a recognizable classifier layer")
+
+            # Get the classifier quantizer for the FP32 teacher (frozen)
+            quantizer_fp32 = get_classifier_activation_quantizer(linear, mode='eval')
+            if not (isinstance(quantizer_fp32, QuantizationManager) or quantizer is None):
+                raise ValueError("Activation quantizer not found in the classifier")
+            # Quantize the teacher's features for distillation
+            assert features_fp32 is not None
+            with torch.no_grad():   
+                features_fp32 = quantizer_fp32(features_fp32.detach())
+
+            # Get the classifier quantizer for the Quantized student (trainable)
+            quantizer = get_classifier_activation_quantizer(linear, mode='train')
+            if not (isinstance(quantizer, QuantizationManager) or quantizer is None):
+                raise ValueError("Activation quantizer not found in the classifier")
+            
+            # Quantize the student's features for distillation
+            assert features is not None
+            features = quantizer(features)
+                
+            # Calculate the feature-based distillation loss
+            loss_kd = kd_loss_fn(features,
+                                 features_fp32,
+                                 temperature=config.distillation.temperature,
+                                 loss_type=config.distillation.loss_type)
+        else:
+            # Calculate the logits-based distillation loss
+            loss_kd = kd_loss_fn(y_pred,
+                                 y_pred_fp32,
+                                 temperature=config.distillation.temperature,
+                                 loss_type=config.distillation.loss_type)
+
+        loss_kd = config.distillation.weight * loss_kd
+        # Calculate the standard loss (non-KD loss such as CE loss)
         if config.distillation.weight == 1.:
             loss = 0.
         else:
@@ -70,7 +165,99 @@ def distillation_supervised_step(
             optimizer.step()
         return output_transform(x, y, y_pred, loss * gradient_accumulation_steps)
 
-    return update
+    # def update(engine: Engine, batch: Sequence[torch.Tensor]) -> Union[Any, Tuple[torch.Tensor]]:
+    #     # def get_intermediate_output(module, input, output):
+    #     #     global student_features
+    #     #     student_features = output
+        
+    #     # def register_hooks(student_model):
+    #     # # Works for ResNet-like architectures
+    #     #     if hasattr(student_model, "avgpool"):
+    #     #         student_model.avgpool.register_forward_hook(get_intermediate_output)
+    #     #     else:
+    #     #         student_model.features[-1].register_forward_hook(get_intermediate_output)  # For MobileNet
+    #     quantizer = None
+    #     import ipdb; ipdb.set_trace()
+    #     if 'features' in config.distillation.target:
+    #         # Remove classifier from model in case distillation target is features
+    #         if hasattr(model, 'fc'):
+    #             assert hasattr(model_fp32, 'fc')
+    #             fc_fp32 = model_fp32.fc
+    #             fc = model.fc
+    #             model_fp32.fc = nn.Identity()  # Replace with identity
+    #             model.fc = nn.Identity()  # Replace with identity
+    #         elif hasattr(model, 'classifier'):  # For models like MobileNetV2, EfficientNet
+    #             assert hasattr(model_fp32, 'classifier')
+    #             fc_fp32 = model_fp32.classifier
+    #             fc = model.classifier
+    #             model_fp32.classifier = nn.Identity()  # Replace with identity
+    #             model.classifier = nn.Identity()  # Replace with identity
+    #         else:
+    #             raise ValueError("Model does not have a recognizable classifier layer")
+    #         # For QFD
+    #         if 'quantized' in config.distillation.target:
+    #             quantizer = get_classifier_activation_quantizer(fc, mode='eval')
+    #             if not (isinstance(quantizer, QuantizationManager) or quantizer is None):
+    #                 raise ValueError("Activation quantizer not found in the classifier")
+
+    #     if (engine.state.iteration - 1) % gradient_accumulation_steps == 0:
+    #         optimizer.zero_grad()
+    #     model.train()
+    #     x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
+    #     with torch.no_grad():
+    #         output_fp32 = model_fn(model_fp32, x)
+    #         y_pred_fp32 = model_transform(output_fp32)
+    #     output = model_fn(model, x)
+    #     y_pred = model_transform(output)
+    #     # For QFD
+    #     if quantizer is not None:
+    #         with torch.no_grad():
+    #             y_pred_fp32 = quantizer(y_pred_fp32)
+        
+    #     if 'features' in config.distillation.target:
+    #         # Restore the classifier into the model if it was removed
+    #         if hasattr(model, 'fc'):
+    #             assert hasattr(model_fp32, 'fc')
+    #             model_fp32.fc = fc_fp32
+    #             model.fc = fc
+    #         elif hasattr(model, 'classifier'):
+    #             assert hasattr(model_fp32, 'classifier')
+    #             model_fp32.classifier = fc_fp32
+    #             model.classifier = fc
+    #         else:
+    #             raise ValueError("Model does not have a recognizable classifier layer")
+    #         # For QFD
+    #         if 'quantized' in config.distillation.target:
+    #             quantizer = get_classifier_activation_quantizer(fc, mode='train')
+    #             # Quantize the features for distillation
+    #             y_pred_q = quantizer(y_pred)
+    #         # Run the classifier to get logits (for non-KD loss such as CE loss)
+    #         y_pred = fc(y_pred)
+        
+    #     loss_kd = config.distillation.weight * kd_loss_fn(y_pred_q,
+    #                                                       y_pred_fp32,
+    #                                                       temperature=config.distillation.temperature,
+    #                                                       loss_type=config.distillation.loss_type)
+    #     if config.distillation.weight == 1.:
+    #         loss = 0.
+    #     else:
+    #         loss = (1. - config.distillation.weight) * loss_fn(y_pred, y)
+    #     loss += loss_kd
+    #     if gradient_accumulation_steps > 1:
+    #         loss = loss / gradient_accumulation_steps
+    #     loss.backward()
+    #     if engine.state.iteration % gradient_accumulation_steps == 0:
+    #         optimizer.step()
+    #     return output_transform(x, y, y_pred, loss * gradient_accumulation_steps)
+
+    # # return update
+    return update_new
+
+def get_activations_hook(activations_dict, model_name, layer_name):
+    def hook(module, input, output):
+        activations_dict[f"{model_name}_{layer_name}"] = output.detach()
+    return hook
+
 
 def create_distilling_supervised_trainer(
     model: torch.nn.Module,
@@ -100,6 +287,17 @@ def create_distilling_supervised_trainer(
         param.requires_grad = False
     model_fp32.to(device).eval()
 
+    activations_dict = {}
+    if config.distillation.target == 'qfd':
+        # Register hooks to get the (un-quantized) activations of the last layer
+        if hasattr(model, 'avgpool'):
+            assert hasattr(model_fp32, 'avgpool')
+            model.avgpool.register_forward_hook(get_activations_hook(activations_dict, "model", "avgpool"))
+            model_fp32.avgpool.register_forward_hook(get_activations_hook(activations_dict, "model_fp32", "avgpool"))
+        else:
+            model.features[-1].register_forward_hook(get_activations_hook(activations_dict, "model", "avgpool"))
+            model_fp32.features[-1].register_forward_hook(get_activations_hook(activations_dict, "model_fp32", "avgpool"))
+
     _update = distillation_supervised_step(
         model_fp32,
         model,
@@ -113,6 +311,7 @@ def create_distilling_supervised_trainer(
         gradient_accumulation_steps,
         model_fn,
         config,
+        activations_dict,
     )
     trainer = Engine(_update) if not deterministic else DeterministicEngine(_update)
     if _scaler and scaler and isinstance(scaler, bool):
