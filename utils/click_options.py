@@ -503,12 +503,12 @@ def quantization_options(func):
         type=click.Choice(["Hailo", "all", "LSQ", "FP_logits", "fc4", "fc4_dw8", "LSQ_paper"]),
         help="Method to quantize the network.",
     )
-    # @click.option(
-    #     "--fold-bn",
-    #     default=None,
-    #     type=int,
-    #     help="BN folding method: 0: Naive, 1: Update B Stats, 2: Krishnamoorthi.",
-    # )
+    @click.option(
+        "--bn-folding",
+        default="unfolded_fp32",
+        type=click.Choice(["unfolded_fp32", "naive", "update", "krishnamoorthi"]),
+        help="BN folding method: unfolded_fp32: Unfolded FP32 BN, naive: Naive BN folding, update: Update BN stats, krishnamoorthi: Krishnamoorthi.",
+    )
     @wraps(func)
     def func_wrapper(config, *args, **kwargs):
         config.quant, remainder_kwargs = split_dict(
@@ -530,7 +530,7 @@ def quantization_options(func):
                 "act_num_candidates",
                 "act_opt_method",
                 "act_quant_method",
-                # "fold_bn",
+                "bn_folding",
             ],
         )
 
@@ -566,7 +566,7 @@ def quant_params_dict(config):
         "act_range_method": config.quant.act_quant_method.cls,
         "act_range_options": act_range_options,
         "quantize_input": True if config.quant.quant_setup == "LSQ_paper" else False,
-        # "fold_bn": config.quant.fold_bn,
+        "bn_folding": config.quant.bn_folding,
     }
 
     return qparams

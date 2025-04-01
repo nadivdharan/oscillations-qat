@@ -64,6 +64,10 @@ def train_quantized(config):
     Main QAT function
     """
 
+    print("\n==========================")
+    print(f'Seed: {config.base.seed}')
+    print("==========================\n")
+
     print("Setting up network and data loaders")
     qparams = quant_params_dict(config)
 
@@ -191,6 +195,7 @@ def train_quantized(config):
     evaluator.run(dataloaders.val_loader)
     log_metrics(evaluator.state.metrics, "Evaluation", trainer.state.epoch)
 
+    # import ipdb; ipdb.set_trace()
     # BN Re-estimation
     if config.qat.reestimate_bn_stats:
         evaluator.add_event_handler(

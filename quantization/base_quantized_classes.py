@@ -69,6 +69,7 @@ class QuantizedModule(nn.Module):
         **kwargs
     ):
         kwargs.pop("act_quant_dict", None)
+        kwargs.pop("bn_folding", None)
 
         super().__init__(*args, **kwargs)
 
