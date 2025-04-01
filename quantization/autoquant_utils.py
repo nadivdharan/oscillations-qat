@@ -198,7 +198,6 @@ non_bn_module_map = {
 non_param_modules = (_AdaptiveAvgPoolNd, _AvgPoolNd)
 # BN Quant Modules Map
 bn_module_map = {nn.Conv1d: BNQConv1d, nn.Conv2d: BNQConv, nn.Linear: BNQLinear}
-# bn_folded_module_map = {nn.Conv1d: FoldedBNQConv1d, nn.Conv2d: FoldedBNQConv, nn.Linear: FoldedBNQLinear}
 
 quant_conv_modules = (QuantConv1d, QuantConv, BNQConv1d, BNQConv)
 
