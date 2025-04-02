@@ -15,7 +15,7 @@ from torch.nn.modules.pooling import _AdaptiveAvgPoolNd, _AvgPoolNd
 from quantization.base_quantized_classes import QuantizedActivation, QuantizedModule
 from quantization.hijacker import QuantizationHijacker, activations_set
 from quantization.quantization_manager import QuantizationManager
-from quantization.quantized_folded_bn import BNFusedHijacker, BNHijacker
+from quantization.quantized_folded_bn import BNFusedHijacker, BNHijacker, BNFusedUpdateHijacker
 
 
 class QuantConv1d(QuantizationHijacker, nn.Conv1d):
@@ -117,8 +117,23 @@ class BNQConv(BNFusedHijacker, nn.Conv2d):
             groups=self.groups,
         )
 
+class FoldedBNUpdateQConv(BNFusedUpdateHijacker, nn.Conv2d):
+    def run_forward(self, x, weight, bias, offsets=None):
+        return F.conv2d(
+            x.contiguous(),
+            weight.contiguous(),
+            bias=bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self.groups,
+        )
 
 class BNQLinear(BNFusedHijacker, nn.Linear):
+    def run_forward(self, x, weight, bias, offsets=None):
+        return F.linear(x.contiguous(), weight.contiguous(), bias=bias)
+
+class FoldedBNUpdateQLinear(BNFusedUpdateHijacker, nn.Linear):
     def run_forward(self, x, weight, bias, offsets=None):
         return F.linear(x.contiguous(), weight.contiguous(), bias=bias)
 
@@ -199,6 +214,7 @@ non_param_modules = (_AdaptiveAvgPoolNd, _AvgPoolNd)
 # BN Quant Modules Map
 bn_module_map = {nn.Conv1d: BNQConv1d, nn.Conv2d: BNQConv, nn.Linear: BNQLinear}
 
+bn_folded_update_module_map = {nn.Conv2d: FoldedBNUpdateQConv, nn.Linear: FoldedBNUpdateQLinear}
 quant_conv_modules = (QuantConv1d, QuantConv, BNQConv1d, BNQConv)
 
 
@@ -275,6 +291,47 @@ def get_module_args(mod, act):
     return kwargs
 
 
+def really_fold_bn_update_stats(module, i, **quant_params):
+    bn = next_bn(module, i)
+    act, act_idx = get_act(module, i)
+    modmap = bn_folded_update_module_map if bn else non_bn_module_map
+    modtype = modmap[type(module[i])]
+    kwargs = get_module_args(module[i], act)
+    if bn and 'bias' in kwargs:
+        kwargs['bias'] = True
+    new_module = modtype(**kwargs, **quant_params)
+    
+    if bn:
+        new_module.gamma.data = module[i + 1].weight.data.clone()
+        new_module.beta.data = module[i + 1].bias.data.clone()
+        new_module.running_mean.data = module[i + 1].running_mean.data.clone()
+        new_module.running_var.data = module[i + 1].running_var.data.clone()
+        if module[i].bias is not None:
+            new_module.running_mean.data -= module[i].bias.data
+            print("Warning: bias in conv/linear before batch normalization.")
+        new_module.epsilon = module[i + 1].eps
+
+        weight = module[i].weight.data.clone()
+        bias = None
+        if module[i].bias is not None:
+            print("Warning: bias in conv/linear before batch normalization.")
+            bias = module[i].bias.data.clone()
+        gamma = module[i + 1].weight.data.clone()
+        beta = module[i + 1].bias.data.clone()
+        running_mean = module[i + 1].running_mean.data.clone()
+        running_var = module[i + 1].running_var.data.clone()
+        epsilon = module[i + 1].eps
+        
+        new_module.weight.data = weight * (gamma / sqrt(running_var + epsilon)).reshape(-1, 1, 1, 1)
+        new_module.bias.data = (bias if bias is not None else 0.) - gamma * running_mean / sqrt(running_var + epsilon) + beta
+
+    elif module[i].bias is not None:
+        new_module.weight.data = module[i].weight.data.clone()
+        new_module.bias.data = module[i].bias.data.clone()
+    
+    return new_module, i + int(bool(act)) + int(bn) + 1  
+    
+
 def really_fold_bn(module, i, **quant_params):
     bn = next_bn(module, i)
     act, act_idx = get_act(module, i)
@@ -346,6 +403,8 @@ def quantize_sequential(model, specials=None, tie_activation_quantizers=False, *
                 new_module, new_i = fold_bn(model, i, **quant_params)
             elif bn_folding == 'naive':
                 new_module, new_i = really_fold_bn(model, i, **quant_params)
+            elif bn_folding == 'update':
+                new_module, new_i = really_fold_bn_update_stats(model, i, **quant_params)
             else: 
                 raise ValueError(f"Unrecognized BN folding method {bn_folding}")
             quant_modules.append(new_module)

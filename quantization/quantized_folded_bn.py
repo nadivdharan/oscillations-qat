@@ -9,6 +9,82 @@ from torch.nn.modules.conv import _ConvNd
 from quantization.hijacker import QuantizationHijacker
 
 
+class BNFusedUpdateHijacker(QuantizationHijacker):
+    """Extension to the QuantizationHijacker that fuses batch normalization (BN) after a weight
+    layer into a joined module. The parameters and the statistics of the BN layer remain in
+    full-precision.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("bias", None)  # Bias will be learned by BN params
+        # super().__init__(*args, **kwargs, bias=False)
+        super().__init__(*args, **kwargs, bias=True)
+        bn_dim = self.get_bn_dim()
+        self.register_buffer("running_mean", torch.zeros(bn_dim))
+        self.register_buffer("running_var", torch.ones(bn_dim))
+        self.momentum = kwargs.pop("momentum", 0.1)
+        self.gamma = nn.Parameter(torch.ones(bn_dim), requires_grad=False)
+        self.beta = nn.Parameter(torch.zeros(bn_dim), requires_grad=False)
+        self.epsilon = kwargs.get("eps", 1e-5)
+        # self.bias = None
+
+    def forward(self, x):
+        # Quantize input
+        if self.quantize_input and self._quant_a:
+            x = self.activation_quantizer(x)
+            
+        # Update running stats
+        with torch.no_grad():
+            res = self.run_forward(x, self.weight.detach(), self.bias.detach())
+            # Get batch stats
+            if len(res.shape) == 4:
+                # For 2D conv
+                batch_mean = torch.mean(res, axis=(0, 2, 3))
+                batch_var = torch.var(res, axis=(0, 2, 3))
+            elif len(res.shape) == 2:
+                # For 1D conv / linear
+                batch_mean = torch.mean(res, axis=(0))
+                batch_var = torch.var(res, axis=(0))
+            else:
+                raise ValueError(f"Unsupported input shape: {res.shape}")
+
+            # Update running stats
+            if self.training:
+                self.running_mean = (1. - self.momentum) * self.running_mean + self.momentum * batch_mean
+                self.running_var  = (1. - self.momentum) * self.running_var  + self.momentum * batch_var
+            
+        # Fold BN into Conv
+        weight = self.weight * (self.gamma / torch.sqrt(self.running_var + self.epsilon)).view(-1, 1, 1, 1)
+        bias = (self.bias if self.bias is not None else 0.) - (self.gamma * self.running_mean / torch.sqrt(self.running_var + self.epsilon)) + self.beta
+
+        # Get quantized weight
+        # weight, bias = self.get_params()
+        if self._quant_w:
+            weight = self.quantize_weights(weight)
+
+        res = self.run_forward(x, weight, bias)
+        
+        # Apply fused activation function
+        if self.activation_function is not None:
+            res = self.activation_function(res)
+
+        # Quantize output
+        if not self.quantize_input and self._quant_a:
+            res = self.activation_quantizer(res)
+        return res
+
+    def get_bn_dim(self):
+        if isinstance(self, nn.Linear):
+            return self.out_features
+        elif isinstance(self, _ConvNd):
+            return self.out_channels
+        else:
+            msg = (
+                f"Unsupported type used: {self}. Must be a linear or (transpose)-convolutional "
+                f"nn.Module"
+            )
+            raise NotImplementedError(msg)
+
 class BNFusedHijacker(QuantizationHijacker):
     """Extension to the QuantizationHijacker that fuses batch normalization (BN) after a weight
     layer into a joined module. The parameters and the statistics of the BN layer remain in
