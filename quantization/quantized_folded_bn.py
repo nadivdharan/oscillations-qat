@@ -16,9 +16,8 @@ class BNFusedUpdateHijacker(QuantizationHijacker):
     """
 
     def __init__(self, *args, **kwargs):
-        kwargs.pop("bias", None)  # Bias will be learned by BN params
-        # super().__init__(*args, **kwargs, bias=False)
-        super().__init__(*args, **kwargs, bias=True)
+        kwargs.pop("bias", None) # Bias will be learned by BN params
+        super().__init__(*args, **kwargs, bias=False)
         bn_dim = self.get_bn_dim()
         self.register_buffer("running_mean", torch.zeros(bn_dim))
         self.register_buffer("running_var", torch.ones(bn_dim))
@@ -26,7 +25,7 @@ class BNFusedUpdateHijacker(QuantizationHijacker):
         self.gamma = nn.Parameter(torch.ones(bn_dim), requires_grad=False)
         self.beta = nn.Parameter(torch.zeros(bn_dim), requires_grad=False)
         self.epsilon = kwargs.get("eps", 1e-5)
-        # self.bias = None
+        self.bias = None
 
     def forward(self, x):
         # Quantize input
@@ -35,7 +34,9 @@ class BNFusedUpdateHijacker(QuantizationHijacker):
             
         # Update running stats
         with torch.no_grad():
-            res = self.run_forward(x, self.weight.detach(), self.bias.detach())
+            res = self.run_forward(x,
+                                   self.weight.detach(),
+                                   self.bias.detach() if self.bias is not None else None)
             # Get batch stats
             if len(res.shape) == 4:
                 # For 2D conv

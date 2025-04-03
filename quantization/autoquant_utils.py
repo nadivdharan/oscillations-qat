@@ -296,10 +296,15 @@ def really_fold_bn_update_stats(module, i, **quant_params):
     act, act_idx = get_act(module, i)
     modmap = bn_folded_update_module_map if bn else non_bn_module_map
     modtype = modmap[type(module[i])]
+
     kwargs = get_module_args(module[i], act)
-    if bn and 'bias' in kwargs:
-        kwargs['bias'] = True
+    # Initialize bias so it would be properly registered -
+    # NOTE Actually, no need as bias will be learned with folded BN 
+    #      params in module`s forward call (hence commented out)
+    # if bn and 'bias' in kwargs:
+    #     kwargs['bias'] = True
     new_module = modtype(**kwargs, **quant_params)
+    new_module.weight.data = module[i].weight.data.clone()
     
     if bn:
         new_module.gamma.data = module[i + 1].weight.data.clone()
@@ -311,22 +316,7 @@ def really_fold_bn_update_stats(module, i, **quant_params):
             print("Warning: bias in conv/linear before batch normalization.")
         new_module.epsilon = module[i + 1].eps
 
-        weight = module[i].weight.data.clone()
-        bias = None
-        if module[i].bias is not None:
-            print("Warning: bias in conv/linear before batch normalization.")
-            bias = module[i].bias.data.clone()
-        gamma = module[i + 1].weight.data.clone()
-        beta = module[i + 1].bias.data.clone()
-        running_mean = module[i + 1].running_mean.data.clone()
-        running_var = module[i + 1].running_var.data.clone()
-        epsilon = module[i + 1].eps
-        
-        new_module.weight.data = weight * (gamma / sqrt(running_var + epsilon)).reshape(-1, 1, 1, 1)
-        new_module.bias.data = (bias if bias is not None else 0.) - gamma * running_mean / sqrt(running_var + epsilon) + beta
-
     elif module[i].bias is not None:
-        new_module.weight.data = module[i].weight.data.clone()
         new_module.bias.data = module[i].bias.data.clone()
     
     return new_module, i + int(bool(act)) + int(bn) + 1  
