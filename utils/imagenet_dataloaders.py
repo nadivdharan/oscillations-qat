@@ -88,9 +88,18 @@ class ImageNetDataLoaders(object):
 
     @property
     def train_loader(self) -> torch_data.DataLoader:
+        # TODO Clean this up
+        # NUM_OF_IMGS = 600000
+        NUM_OF_IMGS = None
         if not self._train_loader:
             root = os.path.join(self.images_dir, "train")
             train_set = torchvision.datasets.ImageFolder(root, transform=self.train_transforms)
+            # TODO Clean this up
+            if NUM_OF_IMGS is not None:
+                train_set.imgs = train_set.imgs[:NUM_OF_IMGS]
+                train_set.samples = train_set.samples[:NUM_OF_IMGS]
+                train_set.targets = train_set.targets[:NUM_OF_IMGS]                
+            
             self._train_loader = torch_data.DataLoader(
                 train_set,
                 batch_size=self.batch_size,

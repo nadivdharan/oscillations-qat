@@ -304,8 +304,6 @@ def really_fold_bn_update_stats(module, i, **quant_params):
     # if bn and 'bias' in kwargs:
     #     kwargs['bias'] = True
     new_module = modtype(**kwargs, **quant_params)
-    new_module.weight.data = module[i].weight.data.clone()
-    
     if bn:
         new_module.gamma.data = module[i + 1].weight.data.clone()
         new_module.beta.data = module[i + 1].bias.data.clone()
@@ -316,7 +314,13 @@ def really_fold_bn_update_stats(module, i, **quant_params):
             print("Warning: bias in conv/linear before batch normalization.")
         new_module.epsilon = module[i + 1].eps
 
+        # NOTE this can probably be unified with the below elif statement
+        new_module.weight.data = module[i].weight.data.clone()
+        if module[i].bias is not None:
+            new_module.bias.data = module[i].bias.data.clone()
+
     elif module[i].bias is not None:
+        new_module.weight.data = module[i].weight.data.clone()
         new_module.bias.data = module[i].bias.data.clone()
     
     return new_module, i + int(bool(act)) + int(bn) + 1  

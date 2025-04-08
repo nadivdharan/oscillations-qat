@@ -33,30 +33,26 @@ class BNFusedUpdateHijacker(QuantizationHijacker):
             x = self.activation_quantizer(x)
             
         # Update running stats
+        if self.training:
+            with torch.no_grad():
+                res_for_stats = self.run_forward(x,
+                                    self.weight.detach(),
+                                    self.bias.detach() if self.bias is not None else None)
+        
         with torch.no_grad():
-            res = self.run_forward(x,
-                                   self.weight.detach(),
-                                   self.bias.detach() if self.bias is not None else None)
-            # Get batch stats
-            if len(res.shape) == 4:
+            gamma = self.gamma.detach()
+            beta = self.beta.detach()
+            running_mean = self.running_mean.detach()
+            std = torch.sqrt(self.running_var.detach() + self.epsilon)
+            if len(self.weight.shape) == 4:
                 # For 2D conv
-                batch_mean = torch.mean(res, axis=(0, 2, 3))
-                batch_var = torch.var(res, axis=(0, 2, 3))
-            elif len(res.shape) == 2:
+                weight = self.weight.detach() * (gamma / std).view(-1, 1, 1, 1)
+            elif len(self.weight.shape) == 2:
                 # For 1D conv / linear
-                batch_mean = torch.mean(res, axis=(0))
-                batch_var = torch.var(res, axis=(0))
+                weight = self.weight.detach() * (gamma / std).view(-1, 1)
             else:
-                raise ValueError(f"Unsupported input shape: {res.shape}")
-
-            # Update running stats
-            if self.training:
-                self.running_mean = (1. - self.momentum) * self.running_mean + self.momentum * batch_mean
-                self.running_var  = (1. - self.momentum) * self.running_var  + self.momentum * batch_var
-            
-        # Fold BN into Conv
-        weight = self.weight * (self.gamma / torch.sqrt(self.running_var + self.epsilon)).view(-1, 1, 1, 1)
-        bias = (self.bias if self.bias is not None else 0.) - (self.gamma * self.running_mean / torch.sqrt(self.running_var + self.epsilon)) + self.beta
+                raise ValueError(f"Unsupported input shape: {self.weight.shape}")              
+            bias = (self.bias.detach() if self.bias is not None else torch.zeros_like(running_mean)) - (gamma * running_mean / std) + beta
 
         # Get quantized weight
         # weight, bias = self.get_params()
@@ -72,6 +68,24 @@ class BNFusedUpdateHijacker(QuantizationHijacker):
         # Quantize output
         if not self.quantize_input and self._quant_a:
             res = self.activation_quantizer(res)
+        
+        if self.training:
+            with torch.no_grad():
+                # Get batch stats
+                if len(res_for_stats.shape) == 4:
+                    # For 2D conv
+                    batch_mean = torch.mean(res_for_stats, axis=(0, 2, 3))
+                    batch_var = torch.var(res_for_stats, axis=(0, 2, 3))
+                elif len(res_for_stats.shape) == 2:
+                    # For 1D conv / linear
+                    batch_mean = torch.mean(res_for_stats, axis=(0))
+                    batch_var = torch.var(res_for_stats, axis=(0))
+                else:
+                    raise ValueError(f"Unsupported input shape: {res_for_stats.shape}")
+                # Update running stats
+                self.running_mean = (1. - self.momentum) * self.running_mean + self.momentum * batch_mean
+                self.running_var  = (1. - self.momentum) * self.running_var  + self.momentum * batch_var
+
         return res
 
     def get_bn_dim(self):
