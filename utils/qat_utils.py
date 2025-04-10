@@ -115,14 +115,16 @@ class UpdateDampeningLossWeighting:
 
 def get_fp32_model(config):
     '''Load FP32 model from pretrained weights'''
-    from torchvision.models import resnet18
+    from torchvision.models import resnet18, resnet50
     from models.mobilenet_v2 import MobileNetV2
 
     model_name = config.base.architecture.name.strip('_quantized')
-    assert model_name in ['resnet18', 'mobilenet_v2'], f"Model {model_name} not supported" 
+    assert model_name in ['resnet50', 'resnet18', 'mobilenet_v2'], f"Model {model_name} not supported" 
 
     if model_name == 'resnet18':
         model = resnet18(pretrained=True)
+    elif model_name == 'resnet50':
+        model = resnet50(pretrained=True)
     elif model_name == 'mobilenet_v2':
         model = MobileNetV2()
         model_dir = config.base.model_dir
