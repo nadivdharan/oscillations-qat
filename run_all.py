@@ -3,10 +3,16 @@ import os
 from pathlib import Path
 from time import time
 
-cmd = "CUDA_VISIBLE_DEVICES={cuda} python main.py train-quantized  --architecture {arch}_quantized --images-dir /data/data/imagenet/ --act-quant-method MSE  --weight-quant-method MSE --optimizer SGD --weight-decay 2.5e-05 --sep-quant-optimizer --quant-optimizer Adam --quant-learning-rate 1e-5 --quant-weight-decay 0.0 --learning-rate-schedule cosine:0 --n-bits {nbits} --learning-rate 0.0033 --progress-bar --save-checkpoint-dir {save_dir}  --max-epochs {epochs} --no-reestimate-bn-stats"
+cmd = "CUDA_VISIBLE_DEVICES={cuda} python main.py train-quantized  --architecture {arch}_quantized --images-dir /data/data/imagenet/ --act-quant-method MSE  --weight-quant-method MSE --optimizer SGD --weight-decay 2.5e-05 --sep-quant-optimizer --quant-optimizer Adam --quant-learning-rate 1e-5 --quant-weight-decay 0.0 --learning-rate-schedule cosine:0 --n-bits {nbits} --learning-rate {lr} --progress-bar --save-checkpoint-dir {save_dir}  --max-epochs {epochs} --no-reestimate-bn-stats"
 NUM_EXPS = 4
 BASE_DIR = "/home/nadivd/workspace/QAT/repos/oscillation/runs/2025-03-10/"
 # EXP_TYPES = ["regularization", "knowledge_distillation", "batchnorm_folding"]
+LEARNING_RATES = {
+    2: 0.01,
+    3: 0.01,
+    4: 0.0033,
+    8: 0.0033,
+}
 EXP_TYPES = {
     "vanilla":
         [
@@ -119,6 +125,7 @@ def main(args):
     # save_dir = args.save_dir
     exp_type = args.exp_type
     epochs = args.epochs
+    lr = LEARNING_RATES[nbits]
     
     for run_type in EXP_TYPES[exp_type]:
         # Create the directory for each experiment
@@ -133,11 +140,13 @@ def main(args):
                                  arch=arch,
                                  nbits=nbits,
                                  epochs=epochs,
+                                 lr=lr,
                                  save_dir=run_dir_exp)
             cmd2run = get_more_args(cmd2run, exp_type, run_type)
             cmd2run += " > {}/log.txt".format(run_dir_exp)
 
             print(f"Running command: {cmd2run}")
+            os.system(f"echo {cmd2run} > {run_dir_exp}/cmd")
             # try:
             if True:
                 t0 = time()
