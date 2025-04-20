@@ -111,9 +111,17 @@ class ImageNetDataLoaders(object):
 
     @property
     def val_loader(self) -> torch_data.DataLoader:
+        # TODO Clean this up
+        # NUM_OF_IMGS = 100
+        NUM_OF_IMGS = None
         if not self._val_loader:
             root = os.path.join(self.images_dir, "val")
             val_set = torchvision.datasets.ImageFolder(root, transform=self.val_transforms)
+            # TODO Clean this up
+            if NUM_OF_IMGS is not None:
+                val_set.imgs = val_set.imgs[:NUM_OF_IMGS]
+                val_set.samples = val_set.samples[:NUM_OF_IMGS]
+                val_set.targets = val_set.targets[:NUM_OF_IMGS]                
             self._val_loader = torch_data.DataLoader(
                 val_set,
                 batch_size=self.batch_size,

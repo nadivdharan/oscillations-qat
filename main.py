@@ -259,16 +259,25 @@ def train_quantized(config):
     default="quantized",
     help='Either "fp32", or "quantized". Specify weather to load a quantized or a FP ' "model.",
 )
-def validate_quantized(config, load_type):
+@click.option(
+    "--eval-fp32",
+    is_flag=True,
+    default=False,
+    help="Run evaluation on FP32 (unquantized) model",
+)
+def validate_quantized(config, load_type, eval_fp32):
     """
     function for running validation on pre-trained quantized models
     """
+    if load_type == "quantized" and eval_fp32:
+        raise ValueError("FP32 model cannot be evaluated on quantized model")
+
     print("Setting up network and data loaders")
+    model_name = str(config.base.architecture).split('_quantized')[0]
 
-    # validate_fp32_model = True
-    validate_fp32_model = False
-
-    if not validate_fp32_model:
+    if not eval_fp32:
+        n_bits = config.quant.n_bits
+        print(f"Loading {str(n_bits)} bits quantized {model_name} model")
         qparams = quant_params_dict(config)
         dataloaders, model = get_dataloaders_and_model(config=config, load_type=load_type, **qparams)
         if load_type == "fp32":
@@ -290,8 +299,9 @@ def validate_quantized(config, load_type):
         # # import ipdb; ipdb.set_trace()
     
     else:
+        print("Loading FP32 model")
         # # Validate FP32 model
-        from torchvision.models import resnet18
+        from torchvision.models import resnet18, resnet50
         from models.mobilenet_v2 import MobileNetV2
         from utils.imagenet_dataloaders import ImageNetDataLoaders
 
@@ -302,13 +312,12 @@ def validate_quantized(config, load_type):
             config.base.num_workers,
             config.base.interpolation,
         )
-        
-        test_model = 'resnet_18'
-        # test_model = 'mobilenet_v2'
 
-        if test_model == 'resnet_18':
+        if model_name == 'resnet18':
             model = resnet18(pretrained=True)
-        elif test_model == 'mobilenet_v2':
+        elif model_name == 'resnet50':
+            model = resnet50(pretrained=True)
+        elif model_name == 'mobilenet_v2':
             model = MobileNetV2()
             # Load model from pretrained FP32 weights
             model_dir = config.base.model_dir
@@ -316,6 +325,8 @@ def validate_quantized(config, load_type):
             print(f"Loading pretrained weights from {model_dir}")
             state_dict = torch.load(model_dir)
             model.load_state_dict(state_dict)
+        else:
+            raise ValueError(f"Unknown model name {model_name}")
         model.to("cuda:0" if config.base.cuda else "cpu")
     print("Loaded model:\n{}".format(model))
 
@@ -332,7 +343,7 @@ def validate_quantized(config, load_type):
         model=model, metrics=metrics, device="cuda" if config.base.cuda else "cpu"
     )
     pbar.attach(evaluator)
-    print("Start quantized validation")
+    print(f"Start model evaluation on validation set of {'FP32' if eval_fp32 else str(n_bits) + ' bits quantized'} {model_name}")
     evaluator.run(dataloaders.val_loader)
     final_metrics = evaluator.state.metrics
     print(final_metrics)
