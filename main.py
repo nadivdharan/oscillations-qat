@@ -35,6 +35,7 @@ from utils.qat_utils import (
     ReestimateBNStats,
     BinRegularizationLoss,
     QuantSmoother,
+    BatchNormFoldingStatsSwicther,
     ModelChecker
 )
 from utils.supervised_driver import create_trainer_engine, setup_tensorboard_logger, log_metrics
@@ -236,6 +237,19 @@ def train_quantized(config):
         trainer.add_event_handler(
                 Events.ITERATION_COMPLETED,
                 QuantSmoother(model, alpha=smoothing_factor),
+        )
+    elif config.quant.bn_folding == 'krishnamoorthi':
+        # Apply BN folding
+        # EPOCHS_TO_TRAIN = 2
+        EPOCHS_TO_TRAIN = config.base.max_epochs // 2
+        epoch_switch = config.base.max_epochs - EPOCHS_TO_TRAIN + 1
+        if epoch_switch > config.base.max_epochs:
+            print("WARNING: epoch_switch is greater than max_epochs. Second stage of BN folding with running stats WILL NOT be applied")
+        else:
+            print("Applying Two Stage BN folding according to Krishnamoorthi's method")
+        trainer.add_event_handler(
+            Events.EPOCH_STARTED,
+            BatchNormFoldingStatsSwicther(model, epoch_switch=epoch_switch),
         )
 
     print("Starting training")

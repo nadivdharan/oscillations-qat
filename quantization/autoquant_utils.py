@@ -15,7 +15,7 @@ from torch.nn.modules.pooling import _AdaptiveAvgPoolNd, _AvgPoolNd
 from quantization.base_quantized_classes import QuantizedActivation, QuantizedModule
 from quantization.hijacker import QuantizationHijacker, activations_set
 from quantization.quantization_manager import QuantizationManager
-from quantization.quantized_folded_bn import BNFusedHijacker, BNHijacker, BNFusedUpdateHijacker
+from quantization.quantized_folded_bn import BNFusedHijacker, BNHijacker, BNFusedUpdateHijacker, BNFusedKrishnamoorthiHijacker
 
 
 class QuantConv1d(QuantizationHijacker, nn.Conv1d):
@@ -129,11 +129,27 @@ class FoldedBNUpdateQConv(BNFusedUpdateHijacker, nn.Conv2d):
             groups=self.groups,
         )
 
+class FoldedBNTwoStagesQConv(BNFusedKrishnamoorthiHijacker, nn.Conv2d):
+    def run_forward(self, x, weight, bias, offsets=None):
+        return F.conv2d(
+            x.contiguous(),
+            weight.contiguous(),
+            bias=bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self.groups,
+        )
+
 class BNQLinear(BNFusedHijacker, nn.Linear):
     def run_forward(self, x, weight, bias, offsets=None):
         return F.linear(x.contiguous(), weight.contiguous(), bias=bias)
 
 class FoldedBNUpdateQLinear(BNFusedUpdateHijacker, nn.Linear):
+    def run_forward(self, x, weight, bias, offsets=None):
+        return F.linear(x.contiguous(), weight.contiguous(), bias=bias)
+
+class FoldedBNTwoStagesQLinear(BNFusedKrishnamoorthiHijacker, nn.Linear):
     def run_forward(self, x, weight, bias, offsets=None):
         return F.linear(x.contiguous(), weight.contiguous(), bias=bias)
 
@@ -215,6 +231,7 @@ non_param_modules = (_AdaptiveAvgPoolNd, _AvgPoolNd)
 bn_module_map = {nn.Conv1d: BNQConv1d, nn.Conv2d: BNQConv, nn.Linear: BNQLinear}
 
 bn_folded_update_module_map = {nn.Conv2d: FoldedBNUpdateQConv, nn.Linear: FoldedBNUpdateQLinear}
+bn_folded_in_two_stages_module_map = {nn.Conv2d: FoldedBNTwoStagesQConv, nn.Linear: FoldedBNTwoStagesQLinear}
 quant_conv_modules = (QuantConv1d, QuantConv, BNQConv1d, BNQConv)
 
 
@@ -290,7 +307,40 @@ def get_module_args(mod, act):
 
     return kwargs
 
+def really_fold_bn_in_two_stages(module, i, **quant_params):
+    bn = next_bn(module, i)
+    act, act_idx = get_act(module, i)
+    modmap = bn_folded_in_two_stages_module_map if bn else non_bn_module_map
+    modtype = modmap[type(module[i])]
 
+    kwargs = get_module_args(module[i], act)
+    # Initialize bias so it would be properly registered -
+    # NOTE Actually, no need as bias will be learned with folded BN 
+    #      params in module`s forward call (hence commented out)
+    # if bn and 'bias' in kwargs:
+    #     kwargs['bias'] = True
+    new_module = modtype(**kwargs, **quant_params)
+    if bn:
+        new_module.gamma.data = module[i + 1].weight.data.clone()
+        new_module.beta.data = module[i + 1].bias.data.clone()
+        new_module.running_mean.data = module[i + 1].running_mean.data.clone()
+        new_module.running_var.data = module[i + 1].running_var.data.clone()
+        if module[i].bias is not None:
+            new_module.running_mean.data -= module[i].bias.data
+            print("Warning: bias in conv/linear before batch normalization.")
+        new_module.epsilon = module[i + 1].eps
+
+        # NOTE this can probably be unified with the below elif statement
+        new_module.weight.data = module[i].weight.data.clone()
+        if module[i].bias is not None:
+            new_module.bias.data = module[i].bias.data.clone()
+
+    elif module[i].bias is not None:
+        new_module.weight.data = module[i].weight.data.clone()
+        new_module.bias.data = module[i].bias.data.clone()
+    
+    return new_module, i + int(bool(act)) + int(bn) + 1  
+    
 def really_fold_bn_update_stats(module, i, **quant_params):
     bn = next_bn(module, i)
     act, act_idx = get_act(module, i)
@@ -385,6 +435,16 @@ def fold_bn(module, i, **quant_params):
 
 def quantize_sequential(model, specials=None, tie_activation_quantizers=False, **quant_params):
     bn_folding = quant_params.get("bn_folding", None)
+    if bn_folding == 'unfolded_fp32':
+        print("BatchNorm is unfolded in FP32")
+    elif bn_folding == 'naive':
+        print("Folding BatchNorm layers statically")
+    elif bn_folding == 'update':
+        print("Folding BatchNorm layers while updating running stats")
+    elif bn_folding == 'krishnamoorthi':
+        print("Folding BatchNorm layers in two stages (krishnamoorthi's method)")
+    else:
+        raise ValueError(f"Unrecognized BN folding method {bn_folding}")
     specials = specials or dict()
 
     i = 0
@@ -399,6 +459,8 @@ def quantize_sequential(model, specials=None, tie_activation_quantizers=False, *
                 new_module, new_i = really_fold_bn(model, i, **quant_params)
             elif bn_folding == 'update':
                 new_module, new_i = really_fold_bn_update_stats(model, i, **quant_params)
+            elif bn_folding == 'krishnamoorthi':
+                new_module, new_i = really_fold_bn_in_two_stages(model, i, **quant_params)
             else: 
                 raise ValueError(f"Unrecognized BN folding method {bn_folding}")
             quant_modules.append(new_module)

@@ -9,7 +9,7 @@ from collections import OrderedDict
 
 from quantization.hijacker import QuantizationHijacker
 # from quantization.quantized_folded_bn import BNFusedHijacker, BNHijacker
-from quantization.quantized_folded_bn import BNFusedHijacker
+from quantization.quantized_folded_bn import BNFusedHijacker, BNFusedKrishnamoorthiHijacker
 from utils.imagenet_dataloaders import ImageNetDataLoaders
 
 
@@ -149,6 +149,30 @@ class ModelChecker:
                     print(f"Check weight of layer {name}")
                     import ipdb; ipdb.set_trace()
 
+
+class BatchNormFoldingStatsSwicther:
+    """Switches the BatchNorm folding stats from running running mean/var
+    to batch mean/var or vice versa.
+    """
+    def __init__(self, model, epoch_switch):
+        self.model = model
+        self.epoch_switch = epoch_switch
+
+    def __call__(self, engine):
+        print_info = True
+        if engine.state.epoch == self.epoch_switch:            
+            with torch.no_grad():
+                for (name, module) in self.model.named_modules():
+                    if isinstance(module, BNFusedKrishnamoorthiHijacker):
+                        module.use_running_stats = not module.use_running_stats
+                        if print_info:
+                            if module.use_running_stats:
+                                print(f"INFO: Switching to BN folding using running stats")
+                            else:
+                                print(f"INFO: Switching to BN folding using batch stats")
+                            print_info = False
+                    
+                    
 
 class QuantSmoother:
     def __init__(self, model_ema, alpha=0.9999):
