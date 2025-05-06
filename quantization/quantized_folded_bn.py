@@ -23,8 +23,6 @@ class BNFusedKrishnamoorthiHijacker(QuantizationHijacker):
         self.register_buffer("running_mean", torch.zeros(bn_dim))
         self.register_buffer("running_var", torch.ones(bn_dim))
         self.momentum = kwargs.pop("momentum", 0.1)
-        # self.gamma = nn.Parameter(torch.ones(bn_dim), requires_grad=False)
-        # self.beta = nn.Parameter(torch.zeros(bn_dim), requires_grad=False)
         self.gamma = nn.Parameter(torch.ones(bn_dim))
         self.beta = nn.Parameter(torch.zeros(bn_dim))
         self.epsilon = kwargs.get("eps", 1e-5)
@@ -39,9 +37,6 @@ class BNFusedKrishnamoorthiHijacker(QuantizationHijacker):
         # Get batch stats
         if self.training:
             with torch.no_grad():
-                # res_for_stats = self.run_forward(x,
-                #                     self.weight.detach(),
-                #                     self.bias.detach() if self.bias is not None else None)
                 res_for_stats = self.run_forward(x,
                                     self.weight,
                                     self.bias if self.bias is not None else None)
@@ -69,8 +64,7 @@ class BNFusedKrishnamoorthiHijacker(QuantizationHijacker):
             # For 1D conv / linear
             weight = self.weight * (gamma / std).view(-1, 1)
         else:
-            raise ValueError(f"Unsupported input shape: {self.weight.shape}")              
-        # bias = (self.bias.detach() if self.bias is not None else torch.zeros_like(running_mean)) - (gamma * running_mean / std) + beta
+            raise ValueError(f"Unsupported input shape: {self.weight.shape}")
         bias = beta - (gamma * running_mean / std)
         
         # Get quantized weight
@@ -131,84 +125,12 @@ class BNFusedUpdateHijacker(QuantizationHijacker):
         self.register_buffer("running_mean", torch.zeros(bn_dim))
         self.register_buffer("running_var", torch.ones(bn_dim))
         self.momentum = kwargs.pop("momentum", 0.1)
-        # self.gamma = nn.Parameter(torch.ones(bn_dim), requires_grad=False)
-        # self.beta = nn.Parameter(torch.zeros(bn_dim), requires_grad=False)
         self.gamma = nn.Parameter(torch.ones(bn_dim))
         self.beta = nn.Parameter(torch.zeros(bn_dim))
         self.epsilon = kwargs.get("eps", 1e-5)
         self.bias = None
-    
-    # def forward(self, x):
-    def forward_new_update(self, x):
-        assert 0, "\n\nWe are NOT supposed to enter here !!!\n\n"
-        # Quantize input
-        if self.quantize_input and self._quant_a:
-            x = self.activation_quantizer(x)
 
-        # if self.training and x.shape == torch.Size([128, 3, 224, 224]):
-        #     import ipdb; ipdb.set_trace()
-        if self.training:
-            # Compute batch stats for running stats update. 
-            # These do not participate in backpropagation and we
-            # do not want to compute gradients for them
-            with torch.no_grad():
-                # No need to detach the weight and bias here 
-                # since this is already under no_grad
-                conv_out = self.run_forward(x,
-                                            self.weight,
-                                            self.bias if self.bias is not None else None)
-                # conv_out = self.run_forward(x,
-                #                             self.weight.detach(),
-                #                             self.bias.detach() if self.bias is not None else None)
-                if len(conv_out.shape) == 4:
-                    batch_mean = conv_out.mean(dim=(0, 2, 3))
-                    batch_var = conv_out.var(dim=(0, 2, 3))
-                elif len(x.shape) == 2:
-                    batch_mean = conv_out.mean(dim=(0))
-                    batch_var = conv_out.var(dim=(0))
-                else:
-                    raise ValueError(f"Unsupported input shape: {x.shape}")
-
-        std = torch.sqrt(self.running_var.detach() + self.epsilon)
-        if len(self.weight.shape) == 4:
-            # For 2D conv
-            # weight = self.weight * (self.gamma / std).view(-1, 1, 1, 1)
-            weight = self.weight * (self.gamma.detach() / std).view(-1, 1, 1, 1)
-        elif len(self.weight.shape) == 2:
-            # For 1D conv / linear
-            # weight = self.weight * (self.gamma / std).view(-1, 1)
-            weight = self.weight * (self.gamma.detach() / std).view(-1, 1)
-        else:
-            raise ValueError(f"Unsupported input shape: {self.weight.shape}")              
-        bias = self.beta.detach() - (self.gamma.detach() * self.running_mean.detach() / std)  # These is cleaner since self.bias is None by design
-        # bias = (self.bias if self.bias is not None else torch.zeros_like(self.running_mean.detach())) - (self.gamma * self.running_mean.detach() / std) + self.beta
-        
-        # Get quantized weight
-        # weight, bias = self.get_params()
-        if self._quant_w:
-            weight = self.quantize_weights(weight)
-
-        res = self.run_forward(x, weight, bias)
-        
-        # Apply fused activation function
-        if self.activation_function is not None:
-            res = self.activation_function(res)
-
-        # Quantize output
-        if not self.quantize_input and self._quant_a:
-            res = self.activation_quantizer(res)
-        
-        if self.training:
-            with torch.no_grad():
-                # Update running stats
-                self.running_mean = (1. - self.momentum) * self.running_mean + self.momentum * batch_mean
-                self.running_var  = (1. - self.momentum) * self.running_var  + self.momentum * batch_var
-
-        return res
-
-    # def forward_old(self, x):
     def forward(self, x):
-        # assert 0, "\n\nWe are NOT supposed to enter here !!!\n\n"
         # Quantize input
         if self.quantize_input and self._quant_a:
             x = self.activation_quantizer(x)
@@ -220,24 +142,18 @@ class BNFusedUpdateHijacker(QuantizationHijacker):
                                     self.weight.detach(),
                                     self.bias.detach() if self.bias is not None else None)
         
-        # if self.training and x.shape == torch.Size([128, 3, 224, 224]):
-        #     import ipdb; ipdb.set_trace()
-        # with torch.no_grad():
-        gamma = self.gamma#.detach()
-        beta = self.beta#.detach()
+        gamma = self.gamma
+        beta = self.beta
         running_mean = self.running_mean.detach()
         std = torch.sqrt(self.running_var.detach() + self.epsilon)
         if len(self.weight.shape) == 4:
             # For 2D conv
-            # weight = self.weight.detach() * (gamma / std).view(-1, 1, 1, 1)
             weight = self.weight * (gamma / std).view(-1, 1, 1, 1)
         elif len(self.weight.shape) == 2:
             # For 1D conv / linear
-            # weight = self.weight.detach() * (gamma / std).view(-1, 1)
             weight = self.weight * (gamma / std).view(-1, 1)
         else:
             raise ValueError(f"Unsupported input shape: {self.weight.shape}")              
-        # bias = (self.bias.detach() if self.bias is not None else torch.zeros_like(running_mean)) - (gamma * running_mean / std) + beta
         bias = (self.bias if self.bias is not None else torch.zeros_like(running_mean)) - (gamma * running_mean / std) + beta
 
         # Get quantized weight
