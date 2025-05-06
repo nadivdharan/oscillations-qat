@@ -16,6 +16,8 @@ def get_lr_scheduler(optimizer, lr_schedule, epochs):
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, epochs, eta_min=eta_min
             )
+        else:
+            raise ValueError()
     return scheduler
 
 

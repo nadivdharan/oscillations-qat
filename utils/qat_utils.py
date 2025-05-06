@@ -150,7 +150,7 @@ class ModelChecker:
                     import ipdb; ipdb.set_trace()
 
 
-class BatchNormFoldingStatsSwicther:
+class BatchNormFoldingStatsSwitcher:
     """Switches the BatchNorm folding stats from running running mean/var
     to batch mean/var or vice versa.
     """
