@@ -1,5 +1,6 @@
 # Copyright (c) 2022 Qualcomm Technologies, Inc.
 # All Rights Reserved.
+import json
 import logging
 import os
 
@@ -35,7 +36,7 @@ from utils.qat_utils import (
     ReestimateBNStats,
     BinRegularizationLoss,
     QuantSmoother,
-    BatchNormFoldingStatsSwicther,
+    BatchNormFoldingStatsSwitcher,
     ModelChecker
 )
 from utils.supervised_driver import create_trainer_engine, setup_tensorboard_logger, log_metrics
@@ -65,9 +66,9 @@ def train_quantized(config):
     Main QAT function
     """
 
-    print("\n==========================")
-    print(f'Seed: {config.base.seed}')
-    print("==========================\n")
+    cfg_file = os.path.join(config.base.save_checkpoint_dir, "config.json")
+    with open(cfg_file, "w") as f:
+        json.dump(config, f, indent=2, default=str)
 
     print("Setting up network and data loaders")
     qparams = quant_params_dict(config)
@@ -249,7 +250,7 @@ def train_quantized(config):
             print("Applying Two Stage BN folding according to Krishnamoorthi's method")
         trainer.add_event_handler(
             Events.EPOCH_STARTED,
-            BatchNormFoldingStatsSwicther(model, epoch_switch=epoch_switch),
+            BatchNormFoldingStatsSwitcher(model, epoch_switch=epoch_switch),
         )
 
     print("Starting training")
